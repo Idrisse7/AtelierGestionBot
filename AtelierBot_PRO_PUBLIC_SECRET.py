@@ -54,7 +54,7 @@ logging.basicConfig(
 log = logging.getLogger("AtelierBot")
 
 # Conversation states
-SEARCH, ADD_STOCK, ADD_SUPPLIER, ADD_ORDER, ADD_DELIVERY, ADD_REPAIR, ADD_GENERIC, EDIT_GENERIC = range(8)
+SEARCH, ADD_STOCK, ADD_SUPPLIER, ADD_ORDER, ADD_DELIVERY, ADD_REPAIR = range(6)
 
 
 def now_iso() -> str:
@@ -196,32 +196,20 @@ def esc(v: Any) -> str:
 
 
 def menu() -> InlineKeyboardMarkup:
-    """Menu principal : chaque module ouvre un sous-menu dédié."""
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📦 Stock", callback_data="menu:stock"),
-            InlineKeyboardButton("🚨 Ruptures", callback_data="menu:ruptures"),
-        ],
-        [
-            InlineKeyboardButton("📋 Commandes", callback_data="menu:commandes"),
-            InlineKeyboardButton("🚚 Livraisons", callback_data="menu:livraisons"),
-        ],
-        [
-            InlineKeyboardButton("🔧 Réparations", callback_data="menu:reparations"),
-            InlineKeyboardButton("🔎 Rechercher", callback_data="search"),
-        ],
-        [
-            InlineKeyboardButton("🏢 Fournisseurs", callback_data="menu:fournisseurs"),
-            InlineKeyboardButton("📊 Statistiques", callback_data="stats"),
-        ],
-        [
-            InlineKeyboardButton("📥📤 Mouvements", callback_data="menu:movement"),
-            InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device"),
-        ],
-        [
-            InlineKeyboardButton("👥 Collaborateurs", callback_data="users"),
-            InlineKeyboardButton("📝 Activité", callback_data="activity"),
-        ],
+        [InlineKeyboardButton("📦 Stock", callback_data="v2menu:stock"),
+         InlineKeyboardButton("🚨 Ruptures", callback_data="v2menu:ruptures")],
+        [InlineKeyboardButton("📋 Commandes", callback_data="v2menu:commandes"),
+         InlineKeyboardButton("🚚 Livraisons", callback_data="v2menu:livraisons")],
+        [InlineKeyboardButton("🔧 Réparations", callback_data="v2menu:reparations"),
+         InlineKeyboardButton("🔓 Déblocages", callback_data="v2menu:deblocages")],
+        [InlineKeyboardButton("🏢 Fournisseurs", callback_data="v2menu:fournisseurs"),
+         InlineKeyboardButton("📊 Statistiques", callback_data="stats")],
+        [InlineKeyboardButton("📥📤 Mouvements", callback_data="v2menu:mouvements"),
+         InlineKeyboardButton("🔎 Rechercher", callback_data="search")],
+        [InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device")],
+        [InlineKeyboardButton("👥 Collaborateurs", callback_data="v2menu:collaborateurs"),
+         InlineKeyboardButton("📝 Activité", callback_data="activity")],
         [InlineKeyboardButton("🔄 Actualiser", callback_data="home")],
     ])
 
@@ -229,55 +217,6 @@ def menu() -> InlineKeyboardMarkup:
 def back_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Retour", callback_data="home")]
-    ])
-
-
-def module_menu(module: str) -> InlineKeyboardMarkup:
-    """Sous-menu commun pour les modules de gestion."""
-    labels = {
-        "stock": ("📦 STOCK", "add_stock", "stock"),
-        "ruptures": ("🚨 RUPTURES", "add_stock", "ruptures"),
-        "commandes": ("📋 COMMANDES", "add:commandes", "commandes"),
-        "livraisons": ("🚚 LIVRAISONS", "add:livraisons", "livraisons"),
-        "reparations": ("🔧 RÉPARATIONS", "add:reparations", "reparations"),
-        "fournisseurs": ("🏢 FOURNISSEURS", "add_supplier", "fournisseurs"),
-    }
-    title, add_action, view_action = labels[module]
-    buttons = [
-        [InlineKeyboardButton("➕ Ajouter", callback_data=add_action)],
-        [InlineKeyboardButton("📋 Voir", callback_data=view_action)],
-        [InlineKeyboardButton("🔎 Rechercher", callback_data=f"search:{module}")],
-        [InlineKeyboardButton("✏️ Modifier", callback_data=f"edit:{module}")],
-        [InlineKeyboardButton("🗑️ Supprimer", callback_data=f"delete:{module}")],
-    ]
-    if module == "ruptures":
-        buttons = [
-            [InlineKeyboardButton("📋 Voir les ruptures", callback_data="ruptures")],
-            [InlineKeyboardButton("➕ Ajouter au stock", callback_data="add_stock")],
-            [InlineKeyboardButton("🔎 Rechercher", callback_data="search:ruptures")],
-        ]
-    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data="home")])
-    return InlineKeyboardMarkup(buttons)
-
-
-def movement_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📥 Entrée", callback_data="movement:in"),
-            InlineKeyboardButton("📤 Sortie", callback_data="movement:out"),
-        ],
-        [InlineKeyboardButton("📋 Historique", callback_data="movements:list")],
-        [InlineKeyboardButton("⬅️ Retour", callback_data="home")],
-    ])
-
-
-def item_actions(module: str, item_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✏️ Modifier", callback_data=f"edititem:{module}:{item_id}"),
-            InlineKeyboardButton("🗑️ Supprimer", callback_data=f"deleteitem:{module}:{item_id}"),
-        ],
-        [InlineKeyboardButton("⬅️ Retour", callback_data=f"menu:{module}")],
     ])
 
 
@@ -413,172 +352,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     action = q.data
-
-    # Sous-menus des modules.
-    if action.startswith("menu:"):
-        module = action.split(":", 1)[1]
-        if module == "movement":
-            await q.edit_message_text(
-                "📥📤 <b>MOUVEMENTS DE STOCK</b>\n\nChoisis une action :",
-                parse_mode=ParseMode.HTML,
-                reply_markup=movement_menu(),
-            )
-        elif module in {"stock", "ruptures", "commandes", "livraisons", "reparations", "fournisseurs"}:
-            await q.edit_message_text(
-                f"{_module_title(module)}\n\nChoisis une action :",
-                parse_mode=ParseMode.HTML,
-                reply_markup=module_menu(module),
-            )
-        return
-
-    # Lancement des ajouts des modules qui utilisent le formulaire générique.
-    if action.startswith("search:"):
-        module = action.split(":", 1)[1]
-        context.user_data["awaiting_search"] = True
-        context.user_data["search_module"] = module
-        await q.edit_message_text(
-            f"🔎 <b>RECHERCHE {_module_title(module)}</b>\n\n"
-            "Envoie le texte à rechercher.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_menu(),
-        )
-        return
-
-    if action.startswith("add:"):
-        module = action.split(":", 1)[1]
-        if module in MODULE_FIELDS:
-            return await start_generic_add(update, context, module)
-
-    # Sélection d'un élément pour modification/suppression.
-    if action.startswith("edit:"):
-        module = action.split(":", 1)[1]
-        if module in MODULE_FIELDS or module == "stock":
-            await select_for_edit_delete(update, module, "edit")
-        return
-
-    if action.startswith("delete:"):
-        module = action.split(":", 1)[1]
-        if module in MODULE_FIELDS or module == "stock":
-            await select_for_edit_delete(update, module, "delete")
-        return
-
-    # Suppression avec confirmation.
-    if action.startswith("deleteitem:"):
-        _, module, item_id = action.split(":", 2)
-        items = _module_collection(module)
-        item = next((x for x in items if str(x.get("id")) == item_id), None)
-        if not item:
-            await q.answer("Élément introuvable.", show_alert=True)
-            return
-        await q.edit_message_text(
-            "⚠️ <b>CONFIRMER LA SUPPRESSION</b>\n\n"
-            f"🆔 <code>{esc(item_id)}</code>\n\nCette action est définitive.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Supprimer", callback_data=f"confirmdelete:{module}:{item_id}"),
-                    InlineKeyboardButton("❌ Annuler", callback_data=f"menu:{module}"),
-                ]
-            ]),
-        )
-        return
-
-    if action.startswith("confirmdelete:"):
-        _, module, item_id = action.split(":", 2)
-        items = _module_collection(module)
-        old_len = len(items)
-        DB[module] = [x for x in items if str(x.get("id")) != item_id]
-        if len(DB[module]) == old_len:
-            await q.answer("Élément introuvable.", show_alert=True)
-            return
-        log_activity(update.effective_chat.id, f"{module.upper()}_DELETE", item_id)
-        save_db(DB, make_backup=False)
-        await q.edit_message_text(
-            f"🗑️ <b>{_module_title(module)}</b>\n\n"
-            f"Élément <code>{esc(item_id)}</code> supprimé.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=module_menu(module),
-        )
-        return
-
-    # Historique des mouvements.
-    if action == "movements:list":
-        lines = ["📥📤 <b>HISTORIQUE DES MOUVEMENTS</b>", "━━━━━━━━━━━━━━━━━━━━"]
-        if not DB.get("mouvements"):
-            lines.append("\nAucun mouvement.")
-        for x in reversed(DB.get("mouvements", [])[-40:]):
-            lines.append(
-                f"\n🕒 {esc(x.get('date','-'))}\n"
-                f"🔖 {esc(x.get('reference','-'))} • "
-                f"{esc(x.get('type','-'))} • Qté {esc(x.get('quantite','-'))}"
-            )
-        await q.edit_message_text(
-            "\n".join(lines), parse_mode=ParseMode.HTML,
-            reply_markup=movement_menu()
-        )
-        return
-
-    if action == "movement:in" or action == "movement:out":
-        direction = "IN" if action.endswith(":in") else "OUT"
-        context.user_data["awaiting_movement"] = direction
-        await q.edit_message_text(
-            f"{'📥 ENTRÉE' if direction == 'IN' else '📤 SORTIE'} DE STOCK\n\n"
-            "Envoie : <code>REF QUANTITE</code>\n"
-            "Exemple : <code>IP15PRO-BLK-256 2</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_menu(),
-        )
-        return
-
-    if action.startswith("edititem:"):
-        _, module, item_id = action.split(":", 2)
-        items = _module_collection(module)
-        item = next((x for x in items if str(x.get("id")) == item_id), None)
-        if not item:
-            await q.answer("Élément introuvable.", show_alert=True)
-            return
-        fields = MODULE_FIELDS.get(module, [])
-        if module == "stock":
-            fields = [
-                ("produit", "📦 Produit"),
-                ("reference", "🔖 Référence"),
-                ("quantite", "📊 Quantité"),
-                ("prix_achat", "💶 Prix d'achat"),
-                ("seuil", "🚨 Seuil"),
-                ("emplacement", "📍 Emplacement"),
-                ("fournisseur", "🏢 Fournisseur"),
-            ]
-        buttons = [
-            [InlineKeyboardButton(label, callback_data=f"editfield:{module}:{item_id}:{key}")]
-            for key, label in fields
-        ]
-        buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"menu:{module}")])
-        await q.edit_message_text(
-            f"✏️ <b>MODIFIER {esc(item_id)}</b>\n\nChoisis le champ à modifier :",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-        return
-
-    if action.startswith("editfield:"):
-        _, module, item_id, field = action.split(":", 3)
-        context.user_data["edit_module"] = module
-        context.user_data["edit_item_id"] = item_id
-        context.user_data["edit_field"] = field
-        labels = dict(MODULE_FIELDS.get(module, []))
-        if module == "stock":
-            labels.update(dict([
-                ("produit", "📦 Produit"), ("reference", "🔖 Référence"),
-                ("quantite", "📊 Quantité"), ("prix_achat", "💶 Prix d'achat"),
-                ("seuil", "🚨 Seuil"), ("emplacement", "📍 Emplacement"),
-                ("fournisseur", "🏢 Fournisseur")
-            ]))
-        await q.edit_message_text(
-            f"✏️ {labels.get(field, field)}\n\nEnvoie la nouvelle valeur.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_menu(),
-        )
-        return EDIT_GENERIC
 
     if action == "home":
         await q.edit_message_text(
@@ -895,25 +668,11 @@ async def search_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("scan_mode"):
         await scanner_message(update, context)
         return
-    if not context.user_data.get("awaiting_search") and context.user_data.get("awaiting_movement"):
-        direction = context.user_data.pop("awaiting_movement")
-        parts = update.effective_message.text.strip().split()
-        if len(parts) != 2:
-            await update.effective_message.reply_text(
-                "❌ Format invalide. Utilise : REF QUANTITE",
-                reply_markup=movement_menu(),
-            )
-            return
-        context.args = parts
-        await stock_movement(update, context, direction)
-        return
-
     if not context.user_data.get("awaiting_search"):
         return
 
     query = update.effective_message.text.strip().lower()
     context.user_data["awaiting_search"] = False
-    context.user_data.pop("search_module", None)
 
     results: list[str] = []
 
@@ -1096,229 +855,11 @@ async def add_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "created_at": now_iso(),
         })
         log_activity(update.effective_chat.id, "SUPPLIER_CREATE", context.user_data["nom"])
-        save_db(DB, make_backup=False)
         context.user_data.clear()
         await update.effective_message.reply_text(
             "✅ Fournisseur ajouté.", reply_markup=menu()
         )
         return ConversationHandler.END
-    return ConversationHandler.END
-
-
-
-MODULE_FIELDS = {
-    "commandes": [
-        ("numero", "🔢 Numéro de commande"),
-        ("fournisseur", "🏢 Fournisseur"),
-        ("statut", "📌 Statut"),
-        ("date", "📅 Date"),
-        ("montant", "💶 Montant"),
-    ],
-    "livraisons": [
-        ("commande", "📦 Numéro de commande"),
-        ("transporteur", "🚛 Transporteur"),
-        ("statut", "📌 Statut"),
-        ("suivi", "🔎 Numéro de suivi"),
-        ("date_prevue", "📅 Date prévue"),
-    ],
-    "reparations": [
-        ("numero", "🔢 Numéro de réparation"),
-        ("appareil", "📱 Appareil / modèle"),
-        ("client", "👤 Client"),
-        ("panne", "🛠️ Panne / réparation effectuée"),
-        ("statut", "📌 Statut"),
-        ("devis", "💶 Prix / devis"),
-        ("notes", "📝 Notes"),
-    ],
-}
-
-
-def _module_collection(module: str):
-    return DB.get(module, [])
-
-
-def _module_title(module: str) -> str:
-    return {
-        "commandes": "📋 COMMANDES",
-        "livraisons": "🚚 LIVRAISONS",
-        "reparations": "🔧 RÉPARATIONS",
-        "fournisseurs": "🏢 FOURNISSEURS",
-        "stock": "📦 STOCK",
-    }.get(module, module.upper())
-
-
-def _item_id(module: str, item: dict[str, Any]) -> str:
-    return str(item.get("id", ""))
-
-
-async def start_generic_add(update: Update, context: ContextTypes.DEFAULT_TYPE, module: str):
-    if not await require_access(update):
-        return ConversationHandler.END
-    context.user_data.clear()
-    context.user_data["generic_module"] = module
-    context.user_data["generic_index"] = 0
-    fields = MODULE_FIELDS[module]
-    context.user_data["generic_step"] = fields[0][0]
-    q = update.callback_query
-    await q.answer()
-    await q.edit_message_text(
-        f"➕ <b>{_module_title(module)}</b>\n\n{fields[0][1]}\n"
-        "Tu peux utiliser /cancel pour annuler.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_menu(),
-    )
-    return ADD_GENERIC
-
-
-async def generic_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update.effective_chat.id):
-        return ConversationHandler.END
-
-    module = context.user_data.get("generic_module")
-    if module not in MODULE_FIELDS:
-        return ConversationHandler.END
-
-    text = update.effective_message.text.strip()
-    fields = MODULE_FIELDS[module]
-    index = int(context.user_data.get("generic_index", 0))
-    key, _ = fields[index]
-    context.user_data[key] = text
-    index += 1
-
-    if index < len(fields):
-        context.user_data["generic_index"] = index
-        context.user_data["generic_step"] = fields[index][0]
-        await update.effective_message.reply_text(
-            fields[index][1],
-            reply_markup=back_menu(),
-        )
-        return ADD_GENERIC
-
-    data = {k: context.user_data.get(k, "") for k, _ in fields}
-    data["id"] = f"{module[:3].upper()}-{len(DB[module])+1:05d}"
-    data["created_at"] = now_iso()
-    data["updated_at"] = now_iso()
-    data["chat_id"] = update.effective_chat.id
-
-    # Normalise les montants numériques.
-    for key in ("montant", "devis"):
-        if key in data:
-            try:
-                data[key] = float(str(data[key]).replace(",", "."))
-            except ValueError:
-                await update.effective_message.reply_text(
-                    f"❌ {key} doit être un nombre. Recommence avec /start."
-                )
-                context.user_data.clear()
-                return ConversationHandler.END
-
-    DB[module].append(data)
-    log_activity(update.effective_chat.id, f"{module.upper()}_CREATE", data.get("id", ""))
-    save_db(DB, make_backup=False)
-
-    context.user_data.clear()
-    await update.effective_message.reply_text(
-        f"✅ <b>{_module_title(module)} ajouté</b>\n\n"
-        f"🆔 <code>{esc(data['id'])}</code>\n"
-        + "\n".join(
-            f"{label.split(' ', 1)[0]} {esc(data.get(key, '-'))}"
-            for key, label in fields
-        ),
-        parse_mode=ParseMode.HTML,
-        reply_markup=module_menu(module),
-    )
-    return ConversationHandler.END
-
-
-def list_module_text(module: str) -> str:
-    items = _module_collection(module)
-    title = _module_title(module)
-    if not items:
-        return f"{title}\n━━━━━━━━━━━━━━━━━━━━\n\nAucun élément."
-    lines = [title, "━━━━━━━━━━━━━━━━━━━━"]
-    for x in items[:40]:
-        lines.append(f"\n🆔 <code>{esc(x.get('id', '-'))}</code>")
-        for key, label in MODULE_FIELDS.get(module, []):
-            val = x.get(key, "-")
-            if key in {"montant", "devis"}:
-                val = money(val)
-            lines.append(f"{label} : {esc(val)}")
-    return "\n".join(lines)
-
-
-async def select_for_edit_delete(update: Update, module: str, mode: str):
-    if not await require_access(update):
-        return
-    q = update.callback_query
-    items = _module_collection(module)
-    if not items:
-        await q.edit_message_text(
-            f"{_module_title(module)}\n\nAucun élément à {mode}.",
-            reply_markup=module_menu(module),
-        )
-        return
-    buttons = []
-    for x in items[:30]:
-        label = str(x.get("id", ""))[:20]
-        extra = x.get("produit") or x.get("appareil") or x.get("nom") or x.get("numero") or ""
-        buttons.append([
-            InlineKeyboardButton(
-                f"{label} • {str(extra)[:22]}",
-                callback_data=f"{mode}item:{module}:{x.get('id','')}",
-            )
-        ])
-    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"menu:{module}")])
-    await q.edit_message_text(
-        f"{'✏️' if mode == 'edit' else '🗑️'} <b>{_module_title(module)}</b>\n\nSélectionne un élément :",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
-
-
-async def edit_generic_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update.effective_chat.id):
-        return ConversationHandler.END
-
-    module = context.user_data.get("edit_module")
-    item_id = context.user_data.get("edit_item_id")
-    field = context.user_data.get("edit_field")
-    items = _module_collection(module)
-    item = next((x for x in items if str(x.get("id")) == str(item_id)), None)
-
-    if not item:
-        context.user_data.clear()
-        await update.effective_message.reply_text("❌ Élément introuvable.", reply_markup=menu())
-        return ConversationHandler.END
-
-    value = update.effective_message.text.strip()
-    if field in {"quantite", "seuil"}:
-        try:
-            value = int(value)
-        except ValueError:
-            await update.effective_message.reply_text("❌ Cette valeur doit être un entier.")
-            return EDIT_GENERIC
-    elif field in {"prix_achat", "montant", "devis"}:
-        try:
-            value = float(value.replace(",", "."))
-        except ValueError:
-            await update.effective_message.reply_text("❌ Cette valeur doit être un nombre.")
-            return EDIT_GENERIC
-
-    item[field] = value
-    item["updated_at"] = now_iso()
-    log_activity(update.effective_chat.id, f"{module.upper()}_EDIT", f"{item_id}: {field}")
-    save_db(DB, make_backup=False)
-    context.user_data.clear()
-
-    await update.effective_message.reply_text(
-        f"✅ <b>{_module_title(module)}</b> modifié.\\n\\n"
-        f"🆔 <code>{esc(item_id)}</code>\\n"
-        f"Champ : <b>{esc(field)}</b>\\n"
-        f"Nouvelle valeur : <code>{esc(value)}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=module_menu(module),
-    )
     return ConversationHandler.END
 
 
@@ -1698,32 +1239,110 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-async def start_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    if not q:
-        return ConversationHandler.END
-    if not await require_access(update):
-        return ConversationHandler.END
-    action = q.data
-    _, module, item_id, field = action.split(":", 3)
-    context.user_data["edit_module"] = module
-    context.user_data["edit_item_id"] = item_id
-    context.user_data["edit_field"] = field
-    labels = dict(MODULE_FIELDS.get(module, []))
-    if module == "stock":
-        labels.update(dict([
-            ("produit", "📦 Produit"), ("reference", "🔖 Référence"),
-            ("quantite", "📊 Quantité"), ("prix_achat", "💶 Prix d'achat"),
-            ("seuil", "🚨 Seuil"), ("emplacement", "📍 Emplacement"),
-            ("fournisseur", "🏢 Fournisseur")
-        ]))
-    await q.answer()
-    await q.edit_message_text(
-        f"✏️ {labels.get(field, field)}\n\nEnvoie la nouvelle valeur.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=back_menu(),
-    )
-    return EDIT_GENERIC
+# ============================================================
+# V2 — SOUS-MENUS RÉELS + DOSSIERS DÉBLOCAGE
+# ============================================================
+
+V2_SECTIONS = {
+ "stock":("📦 STOCK",[("➕ Ajouter","v2act:stock:add"),("📋 Voir","v2act:stock:list"),("🔎 Rechercher","v2act:stock:search"),("✏️ Modifier","v2act:stock:edit"),("🗑️ Supprimer","v2act:stock:delete")]),
+ "ruptures":("🚨 RUPTURES",[("📋 Voir","v2act:ruptures:list"),("🔎 Rechercher","v2act:ruptures:search")]),
+ "commandes":("📋 COMMANDES",[("➕ Ajouter","v2act:commandes:add"),("📋 Voir","v2act:commandes:list"),("🔎 Rechercher","v2act:commandes:search"),("✏️ Modifier","v2act:commandes:edit"),("🗑️ Supprimer","v2act:commandes:delete")]),
+ "livraisons":("🚚 LIVRAISONS",[("➕ Ajouter","v2act:livraisons:add"),("📋 Voir","v2act:livraisons:list"),("🔎 Rechercher","v2act:livraisons:search"),("✏️ Modifier","v2act:livraisons:edit"),("🗑️ Supprimer","v2act:livraisons:delete")]),
+ "reparations":("🔧 RÉPARATIONS",[("➕ Ajouter une réparation","v2act:reparations:add"),("📋 Voir","v2act:reparations:list"),("🔎 Rechercher","v2act:reparations:search"),("✏️ Modifier","v2act:reparations:edit"),("🗑️ Supprimer","v2act:reparations:delete"),("⏸️ Pause","v2act:reparations:pause"),("▶️ Reprendre","v2act:reparations:resume"),("📦 Attente pièce","v2act:reparations:parts"),("👤 Attente client","v2act:reparations:customer"),("🧪 À tester","v2act:reparations:test"),("✅ Terminer","v2act:reparations:done"),("📦 Livrée","v2act:reparations:delivered"),("❌ Annuler","v2act:reparations:cancel")]),
+ "deblocages":("🔓 DÉBLOCAGES",[("➕ Nouveau dossier","v2act:deblocages:add"),("📋 Voir","v2act:deblocages:list"),("🔎 Rechercher","v2act:deblocages:search")]),
+ "fournisseurs":("🏢 FOURNISSEURS",[("➕ Ajouter","v2act:fournisseurs:add"),("📋 Voir","v2act:fournisseurs:list"),("🔎 Rechercher","v2act:fournisseurs:search"),("✏️ Modifier","v2act:fournisseurs:edit"),("🗑️ Supprimer","v2act:fournisseurs:delete")]),
+ "mouvements":("📥📤 MOUVEMENTS",[("📥 Entrée","v2act:mouvements:in"),("📤 Sortie","v2act:mouvements:out"),("📋 Historique","v2act:mouvements:list")]),
+ "collaborateurs":("👥 COLLABORATEURS",[("➕ Ajouter","v2act:collaborateurs:add"),("📋 Voir","v2act:collaborateurs:list"),("🗑️ Révoquer","v2act:collaborateurs:delete")]),
+}
+V2_STATUSES=["EN ATTENTE","EN COURS","EN PAUSE","EN ATTENTE PIÈCE","EN ATTENTE CLIENT","À TESTER","TERMINÉE","LIVRÉE","ANNULÉE"]
+
+def v2_keyboard(section):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(a,callback_data=d)] for a,d in V2_SECTIONS[section][1]]+[[InlineKeyboardButton("⬅️ Retour",callback_data="home")]])
+
+def v2_text(section,qry=None):
+    key=section
+    items=DB.get(key,[])
+    if section=="ruptures":
+        items=[x for x in DB.get("stock",[]) if int(x.get("quantite",0))<=int(x.get("seuil",2))]
+    if qry:
+        q=qry.lower(); items=[x for x in items if q in " ".join(str(v) for v in x.values()).lower()]
+    title=V2_SECTIONS[section][0]
+    if not items:return title+"\n━━━━━━━━━━━━━━━━━━━━\n\nAucun élément."
+    lines=[title,"━━━━━━━━━━━━━━━━━━━━"]
+    for x in items[:40]:
+        lines.append("\n"+esc(str(x)[:900]))
+    return "\n".join(lines)
+
+async def v2_handler(update,context):
+    q=update.callback_query
+    if not q or not await require_access(update): return
+    await q.answer(); data=q.data or ""
+    if data.startswith("v2menu:"):
+        sec=data.split(":",1)[1]
+        if sec in V2_SECTIONS:
+            await q.edit_message_text(V2_SECTIONS[sec][0]+"\n\nChoisis une action :",reply_markup=v2_keyboard(sec))
+        return
+    if not data.startswith("v2act:"): return
+    _,sec,act=data.split(":",2)
+    if sec not in V2_SECTIONS:return
+    if sec=="deblocages" and act=="add":
+        DB.setdefault("deblocages",[])
+        context.user_data.clear();context.user_data["v2_flow"]="deblocage";context.user_data["v2_step"]=1;context.user_data["v2_form"]={}
+        await q.edit_message_text("🔓 <b>NOUVEAU DOSSIER</b>\n\nFRP / Google ou iCloud / Apple ? Réponds <b>FRP</b> ou <b>iCloud</b>.",parse_mode=ParseMode.HTML,reply_markup=back_menu());return
+    if sec=="reparations" and act=="add":
+        context.user_data.clear();context.user_data["v2_flow"]="reparation";context.user_data["v2_step"]=1;context.user_data["v2_form"]={}
+        await q.edit_message_text("➕ <b>NOUVELLE RÉPARATION</b>\n\n1/6 — Numéro de réparation ?",parse_mode=ParseMode.HTML,reply_markup=back_menu());return
+    if act=="list":
+        await q.edit_message_text(v2_text(sec),reply_markup=v2_keyboard(sec),parse_mode=ParseMode.HTML);return
+    if act=="search":
+        context.user_data["v2_search"]=sec
+        await q.edit_message_text("🔎 Envoie le terme à rechercher.",reply_markup=back_menu());return
+    if sec=="reparations" and act in {"pause","resume","parts","customer","test","done","delivered","cancel"}:
+        st={"pause":"EN PAUSE","resume":"EN COURS","parts":"EN ATTENTE PIÈCE","customer":"EN ATTENTE CLIENT","test":"À TESTER","done":"TERMINÉE","delivered":"LIVRÉE","cancel":"ANNULÉE"}[act]
+        context.user_data["v2_status"]=st
+        await q.edit_message_text(f"📌 Nouveau statut : <b>{st}</b>\n\nEnvoie le numéro ou l'IMEI de la réparation.",parse_mode=ParseMode.HTML,reply_markup=back_menu());return
+    await q.edit_message_text("ℹ️ Action prête. Pour préserver les fonctions existantes, la modification/suppression passe d'abord par une recherche.",reply_markup=v2_keyboard(sec))
+
+async def v2_text_router(update,context):
+    if not update.effective_message or not authorized(update.effective_chat.id): return False
+    txt=update.effective_message.text.strip()
+    if context.user_data.get("v2_search"):
+        sec=context.user_data.pop("v2_search")
+        await update.effective_message.reply_text(v2_text(sec,txt),reply_markup=v2_keyboard(sec),parse_mode=ParseMode.HTML);return True
+    if context.user_data.get("v2_status"):
+        st=context.user_data.pop("v2_status");needle=txt.lower()
+        for x in DB.get("reparations",[]):
+            if needle in " ".join(str(v) for v in x.values()).lower():
+                old=x.get("statut","");x["statut"]=st;x.setdefault("historique",[]).append({"date":now_iso(),"action":"statut","ancien":old,"nouveau":st,"user":str(update.effective_chat.id)});save_db(DB)
+                await update.effective_message.reply_text(f"✅ {esc(old)} → <b>{esc(st)}</b>",parse_mode=ParseMode.HTML,reply_markup=menu());return True
+        await update.effective_message.reply_text("❌ Réparation introuvable.",reply_markup=menu());return True
+    flow=context.user_data.get("v2_flow")
+    if flow=="reparation":
+        f=context.user_data.setdefault("v2_form",{});step=context.user_data.get("v2_step",1)
+        keys=[("numero","2/6 — Modèle/appareil ?"),("appareil","3/6 — Client ?"),("client","4/6 — Panne ?"),("panne","5/6 — IMEI (ou -) ?"),("imei","6/6 — Statut ?")]
+        if step<=5:
+            k,p=keys[step-1];f[k]=txt;context.user_data["v2_step"]=step+1;await update.effective_message.reply_text(p,reply_markup=back_menu());return True
+        st=txt.upper()
+        if st not in V2_STATUSES:
+            await update.effective_message.reply_text("❌ Statut invalide.",reply_markup=back_menu());return True
+        item={"numero":f["numero"],"appareil":f["appareil"],"client":f["client"],"panne":f["panne"],"identifiant":"" if f["imei"]=="-" else f["imei"],"type_identifiant":"IMEI" if f["imei"]!="-" else "","statut":st,"date":now_iso(),"historique":[]}
+        DB.setdefault("reparations",[]).append(item);save_db(DB);context.user_data.clear()
+        await update.effective_message.reply_text("✅ <b>Réparation enregistrée.</b>",parse_mode=ParseMode.HTML,reply_markup=menu());return True
+    if flow=="deblocage":
+        f=context.user_data.setdefault("v2_form",{});step=context.user_data.get("v2_step",1)
+        if step==1:
+            if txt.upper() not in {"FRP","ICLOUD","I-CLOUD"}: await update.effective_message.reply_text("Réponds FRP ou iCloud.",reply_markup=back_menu());return True
+            f["type"]="FRP / Google" if txt.upper()=="FRP" else "iCloud / Apple";p="2/4 — Modèle/appareil ?"
+        elif step==2:f["appareil"]=txt;p="3/4 — IMEI (ou -) ?"
+        elif step==3:f["imei"]="" if txt=="-" else txt;p="4/4 — Client ?"
+        else:
+            f["client"]=txt;f["statut"]="EN ATTENTE";f["date"]=now_iso();f["numero"]=f"DB-{len(DB.get('deblocages',[]))+1:05d}";DB.setdefault("deblocages",[]).append(f.copy());save_db(DB);context.user_data.clear();await update.effective_message.reply_text(f"✅ <b>Dossier {esc(f['numero'])} enregistré.</b>",parse_mode=ParseMode.HTML,reply_markup=menu());return True
+        context.user_data["v2_step"]=step+1;await update.effective_message.reply_text(p,reply_markup=back_menu());return True
+    return False
+
+async def v2_text_wrapper(update,context):
+    if await v2_text_router(update,context): return
+    await search_message(update,context)
 
 def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
@@ -1761,52 +1380,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(stock_conv)
     app.add_handler(supplier_conv)
-
-    generic_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(
-                lambda update, context: start_generic_add(update, context, "commandes"),
-                pattern=r"^add:commandes$",
-            ),
-            CallbackQueryHandler(
-                lambda update, context: start_generic_add(update, context, "livraisons"),
-                pattern=r"^add:livraisons$",
-            ),
-            CallbackQueryHandler(
-                lambda update, context: start_generic_add(update, context, "reparations"),
-                pattern=r"^add:reparations$",
-            ),
-        ],
-        states={
-            ADD_GENERIC: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, generic_add_flow)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
-
-    edit_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(
-                start_edit_field,
-                pattern=r"^editfield:",
-            ),
-        ],
-        states={
-            EDIT_GENERIC: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_generic_flow)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
-
-    app.add_handler(generic_conv)
-    app.add_handler(edit_conv)
+    app.add_handler(CallbackQueryHandler(v2_handler, pattern=r"^v2(menu|act):"))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, scanner_webapp))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v2_text_wrapper))
 
     return app
 
@@ -1858,6 +1435,9 @@ def main():
         raise RuntimeError(
             "ATELIER_PASSWORD manquant. Configure le mot de passe collaborateur."
         )
+
+    if not isinstance(DB.get('deblocages'), list):
+        DB['deblocages'] = []
 
     # Initialise la table de correspondance des codes si elle n'existe pas encore.
     if not isinstance(DB.get("codes_stock"), dict):
