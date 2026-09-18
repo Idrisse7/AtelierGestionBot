@@ -54,7 +54,7 @@ logging.basicConfig(
 log = logging.getLogger("AtelierBot")
 
 # Conversation states
-SEARCH, ADD_STOCK, ADD_SUPPLIER, ADD_ORDER, ADD_DELIVERY, ADD_REPAIR = range(6)
+SEARCH, ADD_STOCK, ADD_SUPPLIER, ADD_ORDER, ADD_DELIVERY, ADD_REPAIR, ADD_GENERIC, EDIT_GENERIC = range(8)
 
 
 def now_iso() -> str:
@@ -196,33 +196,32 @@ def esc(v: Any) -> str:
 
 
 def menu() -> InlineKeyboardMarkup:
+    """Menu principal : chaque module ouvre un sous-menu dédié."""
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📦 Stock", callback_data="stock"),
-            InlineKeyboardButton("🚨 Ruptures", callback_data="ruptures"),
+            InlineKeyboardButton("📦 Stock", callback_data="menu:stock"),
+            InlineKeyboardButton("🚨 Ruptures", callback_data="menu:ruptures"),
         ],
         [
-            InlineKeyboardButton("📋 Commandes", callback_data="commandes"),
-            InlineKeyboardButton("🚚 Livraisons", callback_data="livraisons"),
+            InlineKeyboardButton("📋 Commandes", callback_data="menu:commandes"),
+            InlineKeyboardButton("🚚 Livraisons", callback_data="menu:livraisons"),
         ],
         [
-            InlineKeyboardButton("🔧 Réparations", callback_data="reparations"),
+            InlineKeyboardButton("🔧 Réparations", callback_data="menu:reparations"),
             InlineKeyboardButton("🔎 Rechercher", callback_data="search"),
         ],
         [
-            InlineKeyboardButton("🏢 Fournisseurs", callback_data="fournisseurs"),
+            InlineKeyboardButton("🏢 Fournisseurs", callback_data="menu:fournisseurs"),
             InlineKeyboardButton("📊 Statistiques", callback_data="stats"),
         ],
         [
-            InlineKeyboardButton("➕ Ajouter stock", callback_data="add_stock"),
-            InlineKeyboardButton("📥 Mouvement", callback_data="movement"),
+            InlineKeyboardButton("📥📤 Mouvements", callback_data="menu:movement"),
+            InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device"),
         ],
-        [InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device")],
         [
             InlineKeyboardButton("👥 Collaborateurs", callback_data="users"),
             InlineKeyboardButton("📝 Activité", callback_data="activity"),
         ],
-        [InlineKeyboardButton("🏢 Ajouter fournisseur", callback_data="add_supplier")],
         [InlineKeyboardButton("🔄 Actualiser", callback_data="home")],
     ])
 
@@ -230,6 +229,55 @@ def menu() -> InlineKeyboardMarkup:
 def back_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Retour", callback_data="home")]
+    ])
+
+
+def module_menu(module: str) -> InlineKeyboardMarkup:
+    """Sous-menu commun pour les modules de gestion."""
+    labels = {
+        "stock": ("📦 STOCK", "add_stock", "stock"),
+        "ruptures": ("🚨 RUPTURES", "add_stock", "ruptures"),
+        "commandes": ("📋 COMMANDES", "add:commandes", "commandes"),
+        "livraisons": ("🚚 LIVRAISONS", "add:livraisons", "livraisons"),
+        "reparations": ("🔧 RÉPARATIONS", "add:reparations", "reparations"),
+        "fournisseurs": ("🏢 FOURNISSEURS", "add_supplier", "fournisseurs"),
+    }
+    title, add_action, view_action = labels[module]
+    buttons = [
+        [InlineKeyboardButton("➕ Ajouter", callback_data=add_action)],
+        [InlineKeyboardButton("📋 Voir", callback_data=view_action)],
+        [InlineKeyboardButton("🔎 Rechercher", callback_data=f"search:{module}")],
+        [InlineKeyboardButton("✏️ Modifier", callback_data=f"edit:{module}")],
+        [InlineKeyboardButton("🗑️ Supprimer", callback_data=f"delete:{module}")],
+    ]
+    if module == "ruptures":
+        buttons = [
+            [InlineKeyboardButton("📋 Voir les ruptures", callback_data="ruptures")],
+            [InlineKeyboardButton("➕ Ajouter au stock", callback_data="add_stock")],
+            [InlineKeyboardButton("🔎 Rechercher", callback_data="search:ruptures")],
+        ]
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data="home")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def movement_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 Entrée", callback_data="movement:in"),
+            InlineKeyboardButton("📤 Sortie", callback_data="movement:out"),
+        ],
+        [InlineKeyboardButton("📋 Historique", callback_data="movements:list")],
+        [InlineKeyboardButton("⬅️ Retour", callback_data="home")],
+    ])
+
+
+def item_actions(module: str, item_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✏️ Modifier", callback_data=f"edititem:{module}:{item_id}"),
+            InlineKeyboardButton("🗑️ Supprimer", callback_data=f"deleteitem:{module}:{item_id}"),
+        ],
+        [InlineKeyboardButton("⬅️ Retour", callback_data=f"menu:{module}")],
     ])
 
 
@@ -365,6 +413,172 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     action = q.data
+
+    # Sous-menus des modules.
+    if action.startswith("menu:"):
+        module = action.split(":", 1)[1]
+        if module == "movement":
+            await q.edit_message_text(
+                "📥📤 <b>MOUVEMENTS DE STOCK</b>\n\nChoisis une action :",
+                parse_mode=ParseMode.HTML,
+                reply_markup=movement_menu(),
+            )
+        elif module in {"stock", "ruptures", "commandes", "livraisons", "reparations", "fournisseurs"}:
+            await q.edit_message_text(
+                f"{_module_title(module)}\n\nChoisis une action :",
+                parse_mode=ParseMode.HTML,
+                reply_markup=module_menu(module),
+            )
+        return
+
+    # Lancement des ajouts des modules qui utilisent le formulaire générique.
+    if action.startswith("search:"):
+        module = action.split(":", 1)[1]
+        context.user_data["awaiting_search"] = True
+        context.user_data["search_module"] = module
+        await q.edit_message_text(
+            f"🔎 <b>RECHERCHE {_module_title(module)}</b>\n\n"
+            "Envoie le texte à rechercher.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_menu(),
+        )
+        return
+
+    if action.startswith("add:"):
+        module = action.split(":", 1)[1]
+        if module in MODULE_FIELDS:
+            return await start_generic_add(update, context, module)
+
+    # Sélection d'un élément pour modification/suppression.
+    if action.startswith("edit:"):
+        module = action.split(":", 1)[1]
+        if module in MODULE_FIELDS or module == "stock":
+            await select_for_edit_delete(update, module, "edit")
+        return
+
+    if action.startswith("delete:"):
+        module = action.split(":", 1)[1]
+        if module in MODULE_FIELDS or module == "stock":
+            await select_for_edit_delete(update, module, "delete")
+        return
+
+    # Suppression avec confirmation.
+    if action.startswith("deleteitem:"):
+        _, module, item_id = action.split(":", 2)
+        items = _module_collection(module)
+        item = next((x for x in items if str(x.get("id")) == item_id), None)
+        if not item:
+            await q.answer("Élément introuvable.", show_alert=True)
+            return
+        await q.edit_message_text(
+            "⚠️ <b>CONFIRMER LA SUPPRESSION</b>\n\n"
+            f"🆔 <code>{esc(item_id)}</code>\n\nCette action est définitive.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Supprimer", callback_data=f"confirmdelete:{module}:{item_id}"),
+                    InlineKeyboardButton("❌ Annuler", callback_data=f"menu:{module}"),
+                ]
+            ]),
+        )
+        return
+
+    if action.startswith("confirmdelete:"):
+        _, module, item_id = action.split(":", 2)
+        items = _module_collection(module)
+        old_len = len(items)
+        DB[module] = [x for x in items if str(x.get("id")) != item_id]
+        if len(DB[module]) == old_len:
+            await q.answer("Élément introuvable.", show_alert=True)
+            return
+        log_activity(update.effective_chat.id, f"{module.upper()}_DELETE", item_id)
+        save_db(DB, make_backup=False)
+        await q.edit_message_text(
+            f"🗑️ <b>{_module_title(module)}</b>\n\n"
+            f"Élément <code>{esc(item_id)}</code> supprimé.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=module_menu(module),
+        )
+        return
+
+    # Historique des mouvements.
+    if action == "movements:list":
+        lines = ["📥📤 <b>HISTORIQUE DES MOUVEMENTS</b>", "━━━━━━━━━━━━━━━━━━━━"]
+        if not DB.get("mouvements"):
+            lines.append("\nAucun mouvement.")
+        for x in reversed(DB.get("mouvements", [])[-40:]):
+            lines.append(
+                f"\n🕒 {esc(x.get('date','-'))}\n"
+                f"🔖 {esc(x.get('reference','-'))} • "
+                f"{esc(x.get('type','-'))} • Qté {esc(x.get('quantite','-'))}"
+            )
+        await q.edit_message_text(
+            "\n".join(lines), parse_mode=ParseMode.HTML,
+            reply_markup=movement_menu()
+        )
+        return
+
+    if action == "movement:in" or action == "movement:out":
+        direction = "IN" if action.endswith(":in") else "OUT"
+        context.user_data["awaiting_movement"] = direction
+        await q.edit_message_text(
+            f"{'📥 ENTRÉE' if direction == 'IN' else '📤 SORTIE'} DE STOCK\n\n"
+            "Envoie : <code>REF QUANTITE</code>\n"
+            "Exemple : <code>IP15PRO-BLK-256 2</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_menu(),
+        )
+        return
+
+    if action.startswith("edititem:"):
+        _, module, item_id = action.split(":", 2)
+        items = _module_collection(module)
+        item = next((x for x in items if str(x.get("id")) == item_id), None)
+        if not item:
+            await q.answer("Élément introuvable.", show_alert=True)
+            return
+        fields = MODULE_FIELDS.get(module, [])
+        if module == "stock":
+            fields = [
+                ("produit", "📦 Produit"),
+                ("reference", "🔖 Référence"),
+                ("quantite", "📊 Quantité"),
+                ("prix_achat", "💶 Prix d'achat"),
+                ("seuil", "🚨 Seuil"),
+                ("emplacement", "📍 Emplacement"),
+                ("fournisseur", "🏢 Fournisseur"),
+            ]
+        buttons = [
+            [InlineKeyboardButton(label, callback_data=f"editfield:{module}:{item_id}:{key}")]
+            for key, label in fields
+        ]
+        buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"menu:{module}")])
+        await q.edit_message_text(
+            f"✏️ <b>MODIFIER {esc(item_id)}</b>\n\nChoisis le champ à modifier :",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if action.startswith("editfield:"):
+        _, module, item_id, field = action.split(":", 3)
+        context.user_data["edit_module"] = module
+        context.user_data["edit_item_id"] = item_id
+        context.user_data["edit_field"] = field
+        labels = dict(MODULE_FIELDS.get(module, []))
+        if module == "stock":
+            labels.update(dict([
+                ("produit", "📦 Produit"), ("reference", "🔖 Référence"),
+                ("quantite", "📊 Quantité"), ("prix_achat", "💶 Prix d'achat"),
+                ("seuil", "🚨 Seuil"), ("emplacement", "📍 Emplacement"),
+                ("fournisseur", "🏢 Fournisseur")
+            ]))
+        await q.edit_message_text(
+            f"✏️ {labels.get(field, field)}\n\nEnvoie la nouvelle valeur.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_menu(),
+        )
+        return EDIT_GENERIC
 
     if action == "home":
         await q.edit_message_text(
@@ -681,11 +895,25 @@ async def search_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("scan_mode"):
         await scanner_message(update, context)
         return
+    if not context.user_data.get("awaiting_search") and context.user_data.get("awaiting_movement"):
+        direction = context.user_data.pop("awaiting_movement")
+        parts = update.effective_message.text.strip().split()
+        if len(parts) != 2:
+            await update.effective_message.reply_text(
+                "❌ Format invalide. Utilise : REF QUANTITE",
+                reply_markup=movement_menu(),
+            )
+            return
+        context.args = parts
+        await stock_movement(update, context, direction)
+        return
+
     if not context.user_data.get("awaiting_search"):
         return
 
     query = update.effective_message.text.strip().lower()
     context.user_data["awaiting_search"] = False
+    context.user_data.pop("search_module", None)
 
     results: list[str] = []
 
@@ -868,11 +1096,229 @@ async def add_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "created_at": now_iso(),
         })
         log_activity(update.effective_chat.id, "SUPPLIER_CREATE", context.user_data["nom"])
+        save_db(DB, make_backup=False)
         context.user_data.clear()
         await update.effective_message.reply_text(
             "✅ Fournisseur ajouté.", reply_markup=menu()
         )
         return ConversationHandler.END
+    return ConversationHandler.END
+
+
+
+MODULE_FIELDS = {
+    "commandes": [
+        ("numero", "🔢 Numéro de commande"),
+        ("fournisseur", "🏢 Fournisseur"),
+        ("statut", "📌 Statut"),
+        ("date", "📅 Date"),
+        ("montant", "💶 Montant"),
+    ],
+    "livraisons": [
+        ("commande", "📦 Numéro de commande"),
+        ("transporteur", "🚛 Transporteur"),
+        ("statut", "📌 Statut"),
+        ("suivi", "🔎 Numéro de suivi"),
+        ("date_prevue", "📅 Date prévue"),
+    ],
+    "reparations": [
+        ("numero", "🔢 Numéro de réparation"),
+        ("appareil", "📱 Appareil / modèle"),
+        ("client", "👤 Client"),
+        ("panne", "🛠️ Panne / réparation effectuée"),
+        ("statut", "📌 Statut"),
+        ("devis", "💶 Prix / devis"),
+        ("notes", "📝 Notes"),
+    ],
+}
+
+
+def _module_collection(module: str):
+    return DB.get(module, [])
+
+
+def _module_title(module: str) -> str:
+    return {
+        "commandes": "📋 COMMANDES",
+        "livraisons": "🚚 LIVRAISONS",
+        "reparations": "🔧 RÉPARATIONS",
+        "fournisseurs": "🏢 FOURNISSEURS",
+        "stock": "📦 STOCK",
+    }.get(module, module.upper())
+
+
+def _item_id(module: str, item: dict[str, Any]) -> str:
+    return str(item.get("id", ""))
+
+
+async def start_generic_add(update: Update, context: ContextTypes.DEFAULT_TYPE, module: str):
+    if not await require_access(update):
+        return ConversationHandler.END
+    context.user_data.clear()
+    context.user_data["generic_module"] = module
+    context.user_data["generic_index"] = 0
+    fields = MODULE_FIELDS[module]
+    context.user_data["generic_step"] = fields[0][0]
+    q = update.callback_query
+    await q.answer()
+    await q.edit_message_text(
+        f"➕ <b>{_module_title(module)}</b>\n\n{fields[0][1]}\n"
+        "Tu peux utiliser /cancel pour annuler.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_menu(),
+    )
+    return ADD_GENERIC
+
+
+async def generic_add_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update.effective_chat.id):
+        return ConversationHandler.END
+
+    module = context.user_data.get("generic_module")
+    if module not in MODULE_FIELDS:
+        return ConversationHandler.END
+
+    text = update.effective_message.text.strip()
+    fields = MODULE_FIELDS[module]
+    index = int(context.user_data.get("generic_index", 0))
+    key, _ = fields[index]
+    context.user_data[key] = text
+    index += 1
+
+    if index < len(fields):
+        context.user_data["generic_index"] = index
+        context.user_data["generic_step"] = fields[index][0]
+        await update.effective_message.reply_text(
+            fields[index][1],
+            reply_markup=back_menu(),
+        )
+        return ADD_GENERIC
+
+    data = {k: context.user_data.get(k, "") for k, _ in fields}
+    data["id"] = f"{module[:3].upper()}-{len(DB[module])+1:05d}"
+    data["created_at"] = now_iso()
+    data["updated_at"] = now_iso()
+    data["chat_id"] = update.effective_chat.id
+
+    # Normalise les montants numériques.
+    for key in ("montant", "devis"):
+        if key in data:
+            try:
+                data[key] = float(str(data[key]).replace(",", "."))
+            except ValueError:
+                await update.effective_message.reply_text(
+                    f"❌ {key} doit être un nombre. Recommence avec /start."
+                )
+                context.user_data.clear()
+                return ConversationHandler.END
+
+    DB[module].append(data)
+    log_activity(update.effective_chat.id, f"{module.upper()}_CREATE", data.get("id", ""))
+    save_db(DB, make_backup=False)
+
+    context.user_data.clear()
+    await update.effective_message.reply_text(
+        f"✅ <b>{_module_title(module)} ajouté</b>\n\n"
+        f"🆔 <code>{esc(data['id'])}</code>\n"
+        + "\n".join(
+            f"{label.split(' ', 1)[0]} {esc(data.get(key, '-'))}"
+            for key, label in fields
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=module_menu(module),
+    )
+    return ConversationHandler.END
+
+
+def list_module_text(module: str) -> str:
+    items = _module_collection(module)
+    title = _module_title(module)
+    if not items:
+        return f"{title}\n━━━━━━━━━━━━━━━━━━━━\n\nAucun élément."
+    lines = [title, "━━━━━━━━━━━━━━━━━━━━"]
+    for x in items[:40]:
+        lines.append(f"\n🆔 <code>{esc(x.get('id', '-'))}</code>")
+        for key, label in MODULE_FIELDS.get(module, []):
+            val = x.get(key, "-")
+            if key in {"montant", "devis"}:
+                val = money(val)
+            lines.append(f"{label} : {esc(val)}")
+    return "\n".join(lines)
+
+
+async def select_for_edit_delete(update: Update, module: str, mode: str):
+    if not await require_access(update):
+        return
+    q = update.callback_query
+    items = _module_collection(module)
+    if not items:
+        await q.edit_message_text(
+            f"{_module_title(module)}\n\nAucun élément à {mode}.",
+            reply_markup=module_menu(module),
+        )
+        return
+    buttons = []
+    for x in items[:30]:
+        label = str(x.get("id", ""))[:20]
+        extra = x.get("produit") or x.get("appareil") or x.get("nom") or x.get("numero") or ""
+        buttons.append([
+            InlineKeyboardButton(
+                f"{label} • {str(extra)[:22]}",
+                callback_data=f"{mode}item:{module}:{x.get('id','')}",
+            )
+        ])
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"menu:{module}")])
+    await q.edit_message_text(
+        f"{'✏️' if mode == 'edit' else '🗑️'} <b>{_module_title(module)}</b>\n\nSélectionne un élément :",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+
+async def edit_generic_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update.effective_chat.id):
+        return ConversationHandler.END
+
+    module = context.user_data.get("edit_module")
+    item_id = context.user_data.get("edit_item_id")
+    field = context.user_data.get("edit_field")
+    items = _module_collection(module)
+    item = next((x for x in items if str(x.get("id")) == str(item_id)), None)
+
+    if not item:
+        context.user_data.clear()
+        await update.effective_message.reply_text("❌ Élément introuvable.", reply_markup=menu())
+        return ConversationHandler.END
+
+    value = update.effective_message.text.strip()
+    if field in {"quantite", "seuil"}:
+        try:
+            value = int(value)
+        except ValueError:
+            await update.effective_message.reply_text("❌ Cette valeur doit être un entier.")
+            return EDIT_GENERIC
+    elif field in {"prix_achat", "montant", "devis"}:
+        try:
+            value = float(value.replace(",", "."))
+        except ValueError:
+            await update.effective_message.reply_text("❌ Cette valeur doit être un nombre.")
+            return EDIT_GENERIC
+
+    item[field] = value
+    item["updated_at"] = now_iso()
+    log_activity(update.effective_chat.id, f"{module.upper()}_EDIT", f"{item_id}: {field}")
+    save_db(DB, make_backup=False)
+    context.user_data.clear()
+
+    await update.effective_message.reply_text(
+        f"✅ <b>{_module_title(module)}</b> modifié.\\n\\n"
+        f"🆔 <code>{esc(item_id)}</code>\\n"
+        f"Champ : <b>{esc(field)}</b>\\n"
+        f"Nouvelle valeur : <code>{esc(value)}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=module_menu(module),
+    )
     return ConversationHandler.END
 
 
@@ -1251,6 +1697,34 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+async def start_edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not q:
+        return ConversationHandler.END
+    if not await require_access(update):
+        return ConversationHandler.END
+    action = q.data
+    _, module, item_id, field = action.split(":", 3)
+    context.user_data["edit_module"] = module
+    context.user_data["edit_item_id"] = item_id
+    context.user_data["edit_field"] = field
+    labels = dict(MODULE_FIELDS.get(module, []))
+    if module == "stock":
+        labels.update(dict([
+            ("produit", "📦 Produit"), ("reference", "🔖 Référence"),
+            ("quantite", "📊 Quantité"), ("prix_achat", "💶 Prix d'achat"),
+            ("seuil", "🚨 Seuil"), ("emplacement", "📍 Emplacement"),
+            ("fournisseur", "🏢 Fournisseur")
+        ]))
+    await q.answer()
+    await q.edit_message_text(
+        f"✏️ {labels.get(field, field)}\n\nEnvoie la nouvelle valeur.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_menu(),
+    )
+    return EDIT_GENERIC
+
 def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -1287,6 +1761,49 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(stock_conv)
     app.add_handler(supplier_conv)
+
+    generic_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                lambda update, context: start_generic_add(update, context, "commandes"),
+                pattern=r"^add:commandes$",
+            ),
+            CallbackQueryHandler(
+                lambda update, context: start_generic_add(update, context, "livraisons"),
+                pattern=r"^add:livraisons$",
+            ),
+            CallbackQueryHandler(
+                lambda update, context: start_generic_add(update, context, "reparations"),
+                pattern=r"^add:reparations$",
+            ),
+        ],
+        states={
+            ADD_GENERIC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, generic_add_flow)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
+    edit_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(
+                start_edit_field,
+                pattern=r"^editfield:",
+            ),
+        ],
+        states={
+            EDIT_GENERIC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_generic_flow)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+
+    app.add_handler(generic_conv)
+    app.add_handler(edit_conv)
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, scanner_webapp))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_message))
