@@ -282,10 +282,28 @@ def dashboard_metrics() -> dict[str, Any]:
     frp_month = [x for x in unlock_month if "FRP" in str(x.get("type", "")).upper() or "GOOGLE" in str(x.get("type", "")).upper()]
     icloud_month = [x for x in unlock_month if "ICLOUD" in str(x.get("type", "")).upper() or "APPLE" in str(x.get("type", "")).upper()]
 
-    # CA = dossiers terminés/payés, afin de ne pas compter un devis encore en attente.
-    revenue_items = [x for x in repairs + unlocks if _is_finished(x.get("statut"))]
-    revenue_day = sum(_amount(x) for x in revenue_items if same_day(x, now))
-    revenue_month = sum(_amount(x) for x in revenue_items if same_month(x, now))
+    # CA : on comptabilise les prestations enregistrées dès qu'elles ont
+    # un montant, sauf celles explicitement annulées.
+    # - réparations : le devis/prix saisi est pris en compte immédiatement ;
+    # - déblocages : le prix saisi est pris en compte immédiatement ;
+    # - commandes, livraisons et stock ne sont pas du CA : ce sont des
+    #   achats/logistique ou de la valeur de stock.
+    revenue_repairs = [
+        x for x in repairs
+        if str(x.get("statut", "")).strip().upper() not in {"ANNULEE", "ANNULÉE", "ANNULE", "ANNULÉ"}
+    ]
+    revenue_unlocks = [
+        x for x in unlocks
+        if str(x.get("statut", "")).strip().upper() not in {"ANNULEE", "ANNULÉE", "ANNULE", "ANNULÉ"}
+    ]
+    revenue_day = (
+        sum(_amount(x) for x in revenue_repairs if same_day(x, now))
+        + sum(_amount(x) for x in revenue_unlocks if same_day(x, now))
+    )
+    revenue_month = (
+        sum(_amount(x) for x in revenue_repairs if same_month(x, now))
+        + sum(_amount(x) for x in revenue_unlocks if same_month(x, now))
+    )
 
     return {
         "repairs_day": len(repairs_day), "repairs_month": len(repairs_month),
