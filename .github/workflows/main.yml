@@ -1,0 +1,195 @@
+name: AtelierBot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: atelierbot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Recuperer le code et les donnees
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Verifier les fichiers
+        run: |
+          test -f AtelierBot_PRO_PUBLIC_SECRET.py || {
+            echo "ERREUR: AtelierBot_PRO_PUBLIC_SECRET.py est absent du depot."
+            echo "Fichiers Python presents:"
+            find . -maxdepth 2 -name "*.py" -print
+            exit 1
+          }
+
+          test -f data.enc || {
+            echo "ERREUR: data.enc est absent du depot."
+            exit 1
+          }
+
+          echo "Fichiers OK."
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dependances
+        run: |
+          python -m pip install --upgrade pip
+          pip install "python-telegram-bot[job-queue]" cryptography
+
+      - name: Dechiffrer la base privee
+        env:
+          DATA_KEY: ${{ secrets.DATA_KEY }}
+        run: |
+          test -n "$DATA_KEY" || {
+            echo "ERREUR: DATA_KEY manquant dans les Secrets GitHub."
+            exit 1
+          }
+
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from cryptography.fernet import Fernet
+
+          key = os.environ["DATA_KEY"].encode()
+          encrypted_path = Path("data.enc")
+          data_path = Path("data.json")
+
+          encrypted = encrypted_path.read_bytes()
+          if not encrypted:
+              raise SystemExit("ERREUR: data.enc est vide.")
+
+          try:
+              plain = Fernet(key).decrypt(encrypted)
+          except Exception as exc:
+              raise SystemExit(f"ERREUR: impossible de dechiffrer data.enc: {exc}")
+
+          data_path.write_bytes(plain)
+          print(f"Base dechiffree temporairement : {len(plain)} octets.")
+          PY
+
+      - name: Lancer AtelierBot pendant 5h30
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ATELIER_PASSWORD: ${{ secrets.ATELIER_PASSWORD }}
+        run: |
+          test -n "$BOT_TOKEN" || {
+            echo "ERREUR: BOT_TOKEN manquant dans les Secrets GitHub."
+            exit 1
+          }
+
+          test -n "$ATELIER_PASSWORD" || {
+            echo "ERREUR: ATELIER_PASSWORD manquant dans les Secrets GitHub."
+            exit 1
+          }
+
+          python AtelierBot_PRO_PUBLIC_SECRET.py &
+          BOT_PID=$!
+          START_TIME=$(date +%s)
+          MAX_RUNTIME_SECONDS=19800
+
+          echo "AtelierBot demarre (PID $BOT_PID)."
+          echo "Duree maximale : 5h30."
+
+          while kill -0 "$BOT_PID" 2>/dev/null; do
+            sleep 30
+            NOW=$(date +%s)
+            ELAPSED=$((NOW - START_TIME))
+
+            if [ "$ELAPSED" -ge "$MAX_RUNTIME_SECONDS" ]; then
+              echo "5h30 atteintes : arret propre du bot avant le prochain lancement."
+              kill "$BOT_PID" 2>/dev/null || true
+              wait "$BOT_PID" 2>/dev/null || true
+              exit 0
+            fi
+          done
+
+          wait "$BOT_PID"
+          BOT_EXIT=$?
+
+          if [ "$BOT_EXIT" -ne 0 ]; then
+            echo "ERREUR: AtelierBot s'est arrete avec le code $BOT_EXIT."
+            echo "La base chiffree ne sera PAS remplacee."
+            exit "$BOT_EXIT"
+          fi
+
+          echo "AtelierBot s'est arrete normalement."
+
+      - name: Rechiffrer la base uniquement si le bot a fonctionne
+        if: success()
+        env:
+          DATA_KEY: ${{ secrets.DATA_KEY }}
+        run: |
+          test -n "$DATA_KEY" || {
+            echo "ERREUR: DATA_KEY manquant."
+            exit 1
+          }
+
+          test -f data.json || {
+            echo "ERREUR: data.json absent apres execution du bot."
+            exit 1
+          }
+
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from cryptography.fernet import Fernet
+
+          data_path = Path("data.json")
+          encrypted_path = Path("data.enc")
+          plain = data_path.read_bytes()
+
+          if not plain.strip():
+              raise SystemExit("ERREUR: data.json est vide : sauvegarde chiffree annulee.")
+
+          try:
+              json.loads(plain.decode("utf-8"))
+          except Exception as exc:
+              raise SystemExit(f"ERREUR: data.json n'est pas un JSON valide : {exc}")
+
+          key = os.environ["DATA_KEY"].encode()
+          encrypted = Fernet(key).encrypt(plain)
+
+          if not encrypted:
+              raise SystemExit("ERREUR: chiffrement vide, sauvegarde annulee.")
+
+          encrypted_path.write_bytes(encrypted)
+          print(f"Base rechiffree avec succes : {len(plain)} octets en clair.")
+          PY
+
+      - name: Nettoyer les fichiers temporaires
+        if: always()
+        run: |
+          rm -f data.json
+          rm -rf backups
+          echo "Nettoyage termine."
+
+      - name: Sauvegarder uniquement data.enc
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data.enc
+
+          if git diff --cached --quiet; then
+            echo "Aucune modification de la base chiffree."
+          else
+            git commit -m "chore: mise a jour chiffree de la base AtelierBot"
+            git push
+          fi
