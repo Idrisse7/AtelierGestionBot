@@ -7,6 +7,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -84,6 +85,7 @@ def default_db() -> dict[str, Any]:
         "fournisseurs": [],
         "mouvements": [],
         "activity_log": [],
+        "deblocages": [],
     }
 
 
@@ -174,6 +176,15 @@ def admin(chat_id: int | None) -> bool:
     return bool(rec and rec.get("role") == "admin") or chat_id == ADMIN_CHAT_ID
 
 
+def moderator(chat_id: int | None) -> bool:
+    rec = user_record(chat_id) if chat_id is not None else None
+    return bool(rec and rec.get("role") == "moderateur")
+
+
+def can_manage_users(chat_id: int | None) -> bool:
+    return admin(chat_id) or moderator(chat_id)
+
+
 def log_activity(chat_id: int, action: str, details: str = "") -> None:
     DB.setdefault("activity_log", []).append({
         "date": now_iso(),
@@ -221,6 +232,70 @@ def back_menu() -> InlineKeyboardMarkup:
     ])
 
 
+def _entry_datetime(item: dict[str, Any]) -> datetime | None:
+    raw = item.get("date") or item.get("created_at") or item.get("updated_at")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("Europe/Paris"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_finished(status: Any) -> bool:
+    return str(status or "").strip().upper() in {
+        "TERMINEE", "TERMINÉE", "LIVREE", "LIVRÉE", "PAYEE", "PAYÉE", "TERMINE", "TERMINÉ"
+    }
+
+
+def _amount(item: dict[str, Any]) -> float:
+    for key in ("montant", "prix", "devis", "total", "prix_total"):
+        try:
+            return float(str(item.get(key, 0)).replace(" ", "").replace(",", "."))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def dashboard_metrics() -> dict[str, Any]:
+    now = datetime.now(ZoneInfo("Europe/Paris"))
+    repairs = DB.get("reparations", [])
+    unlocks = DB.get("deblocages", [])
+
+    def same_day(x, y):
+        d = _entry_datetime(x)
+        return bool(d and d.date() == y.date())
+
+    def same_month(x, y):
+        d = _entry_datetime(x)
+        return bool(d and d.year == y.year and d.month == y.month)
+
+    repairs_day = [x for x in repairs if same_day(x, now)]
+    repairs_month = [x for x in repairs if same_month(x, now)]
+    unlock_day = [x for x in unlocks if same_day(x, now)]
+    unlock_month = [x for x in unlocks if same_month(x, now)]
+    frp_day = [x for x in unlock_day if "FRP" in str(x.get("type", "")).upper() or "GOOGLE" in str(x.get("type", "")).upper()]
+    icloud_day = [x for x in unlock_day if "ICLOUD" in str(x.get("type", "")).upper() or "APPLE" in str(x.get("type", "")).upper()]
+    frp_month = [x for x in unlock_month if "FRP" in str(x.get("type", "")).upper() or "GOOGLE" in str(x.get("type", "")).upper()]
+    icloud_month = [x for x in unlock_month if "ICLOUD" in str(x.get("type", "")).upper() or "APPLE" in str(x.get("type", "")).upper()]
+
+    # CA = dossiers terminés/payés, afin de ne pas compter un devis encore en attente.
+    revenue_items = [x for x in repairs + unlocks if _is_finished(x.get("statut"))]
+    revenue_day = sum(_amount(x) for x in revenue_items if same_day(x, now))
+    revenue_month = sum(_amount(x) for x in revenue_items if same_month(x, now))
+
+    return {
+        "repairs_day": len(repairs_day), "repairs_month": len(repairs_month),
+        "unlock_day": len(unlock_day), "unlock_month": len(unlock_month),
+        "frp_day": len(frp_day), "icloud_day": len(icloud_day),
+        "frp_month": len(frp_month), "icloud_month": len(icloud_month),
+        "revenue_day": revenue_day, "revenue_month": revenue_month,
+    }
+
+
 def home_text() -> str:
     stock = DB["stock"]
     total_units = sum(int(x.get("quantite", 0)) for x in stock)
@@ -234,6 +309,7 @@ def home_text() -> str:
         <= int(x.get("seuil", DB["settings"]["low_stock_default"]))
     )
     out = sum(1 for x in stock if int(x.get("quantite", 0)) <= 0)
+    m = dashboard_metrics()
 
     return (
         "🔧 <b>ATELIERBOT — PRO</b>\n"
@@ -245,11 +321,19 @@ def home_text() -> str:
         f"📋 Commandes : <b>{len(DB['commandes'])}</b>\n"
         f"🚚 Livraisons : <b>{len(DB['livraisons'])}</b>\n"
         f"🔧 Réparations : <b>{len(DB['reparations'])}</b>\n"
-        f"🏢 Fournisseurs : <b>{len(DB['fournisseurs'])}</b>\n"
+        f"🏢 Fournisseurs : <b>{len(DB['fournisseurs'])}</b>\n\n"
+        "📅 <b>ACTIVITÉ</b>\n"
+        f"🔧 Réparations aujourd'hui : <b>{m['repairs_day']}</b>\n"
+        f"🔧 Réparations ce mois : <b>{m['repairs_month']}</b>\n"
+        f"🔓 Déblocages aujourd'hui : <b>{m['unlock_day']}</b>\n"
+        f"🔓 Déblocages ce mois : <b>{m['unlock_month']}</b>\n"
+        f"🔐 FRP / Google : <b>{m['frp_day']}</b> aujourd'hui • <b>{m['frp_month']}</b> ce mois\n"
+        f"☁️ iCloud / Apple : <b>{m['icloud_day']}</b> aujourd'hui • <b>{m['icloud_month']}</b> ce mois\n"
+        f"💶 CA aujourd'hui : <b>{money(m['revenue_day'])}</b>\n"
+        f"💶 CA ce mois : <b>{money(m['revenue_month'])}</b>\n\n"
         f"💰 Valeur d'achat du stock : <b>{money(value)}</b>\n\n"
         "🟢 <i>Base prête pour tes vraies données.</i>"
     )
-
 
 async def require_access(update: Update) -> bool:
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -478,8 +562,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "users":
-        if not admin(update.effective_chat.id):
-            await q.answer("Administrateur uniquement", show_alert=True)
+        if not can_manage_users(update.effective_chat.id):
+            await q.answer("🔒 Accès réservé à l’administrateur ou au modérateur.", show_alert=True)
             return
 
         lines = ["👥 <b>COLLABORATEURS</b>", "━━━━━━━━━━━━━━━━━━━━"]
@@ -514,8 +598,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action.startswith("revoke:"):
-        if not admin(update.effective_chat.id):
-            await q.answer("Administrateur uniquement", show_alert=True)
+        if not can_manage_users(update.effective_chat.id):
+            await q.answer("🔒 Accès réservé à l’administrateur ou au modérateur.", show_alert=True)
             return
 
         target = action.split(":", 1)[1]
@@ -527,6 +611,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if rec.get("role") == "admin" or target == str(ADMIN_CHAT_ID):
             await q.answer("Impossible de révoquer l'administrateur.", show_alert=True)
+            return
+        if moderator(update.effective_chat.id) and rec.get("role") == "moderateur":
+            await q.answer("🔒 Un modérateur ne peut pas révoquer un autre modérateur.", show_alert=True)
             return
 
         name = rec.get("name", "Collaborateur")
@@ -555,8 +642,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action.startswith("confirm_revoke:"):
-        if not admin(update.effective_chat.id):
-            await q.answer("Administrateur uniquement", show_alert=True)
+        if not can_manage_users(update.effective_chat.id):
+            await q.answer("🔒 Accès réservé à l’administrateur ou au modérateur.", show_alert=True)
             return
 
         target = action.split(":", 1)[1]
@@ -568,6 +655,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if rec.get("role") == "admin" or target == str(ADMIN_CHAT_ID):
             await q.answer("Impossible de révoquer l'administrateur.", show_alert=True)
+            return
+        if moderator(update.effective_chat.id) and rec.get("role") == "moderateur":
+            await q.answer("🔒 Un modérateur ne peut pas révoquer un autre modérateur.", show_alert=True)
             return
 
         name = rec.get("name", "Collaborateur")
@@ -1241,235 +1331,303 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# V2 — SOUS-MENUS RÉELS + DOSSIERS DÉBLOCAGE
+# V2/V3 — SOUS-MENUS + FORMULAIRES COMPLETS
 # ============================================================
 
 V2_SECTIONS = {
- "stock":("📦 STOCK",[("➕ Ajouter","v2act:stock:add"),("📋 Voir","v2act:stock:list"),("🔎 Rechercher","v2act:stock:search"),("✏️ Modifier","v2act:stock:edit"),("🗑️ Supprimer","v2act:stock:delete")]),
- "ruptures":("🚨 RUPTURES",[("📋 Voir","v2act:ruptures:list"),("🔎 Rechercher","v2act:ruptures:search")]),
- "commandes":("📋 COMMANDES",[("➕ Ajouter","v2act:commandes:add"),("📋 Voir","v2act:commandes:list"),("🔎 Rechercher","v2act:commandes:search"),("✏️ Modifier","v2act:commandes:edit"),("🗑️ Supprimer","v2act:commandes:delete")]),
- "livraisons":("🚚 LIVRAISONS",[("➕ Ajouter","v2act:livraisons:add"),("📋 Voir","v2act:livraisons:list"),("🔎 Rechercher","v2act:livraisons:search"),("✏️ Modifier","v2act:livraisons:edit"),("🗑️ Supprimer","v2act:livraisons:delete")]),
- "reparations":("🔧 RÉPARATIONS",[("➕ Ajouter une réparation","v2act:reparations:add"),("📋 Voir","v2act:reparations:list"),("🔎 Rechercher","v2act:reparations:search"),("✏️ Modifier","v2act:reparations:edit"),("🗑️ Supprimer","v2act:reparations:delete"),("⏸️ Pause","v2act:reparations:pause"),("▶️ Reprendre","v2act:reparations:resume"),("📦 Attente pièce","v2act:reparations:parts"),("👤 Attente client","v2act:reparations:customer"),("🧪 À tester","v2act:reparations:test"),("✅ Terminer","v2act:reparations:done"),("📦 Livrée","v2act:reparations:delivered"),("❌ Annuler","v2act:reparations:cancel")]),
- "deblocages":("🔓 DÉBLOCAGES",[("➕ Nouveau dossier","v2act:deblocages:add"),("📋 Voir","v2act:deblocages:list"),("🔎 Rechercher","v2act:deblocages:search")]),
- "fournisseurs":("🏢 FOURNISSEURS",[("➕ Ajouter","v2act:fournisseurs:add"),("📋 Voir","v2act:fournisseurs:list"),("🔎 Rechercher","v2act:fournisseurs:search"),("✏️ Modifier","v2act:fournisseurs:edit"),("🗑️ Supprimer","v2act:fournisseurs:delete")]),
- "mouvements":("📥📤 MOUVEMENTS",[("📥 Entrée","v2act:mouvements:in"),("📤 Sortie","v2act:mouvements:out"),("📋 Historique","v2act:mouvements:list")]),
- "collaborateurs":("👥 COLLABORATEURS",[("➕ Ajouter","v2act:collaborateurs:add"),("📋 Voir","v2act:collaborateurs:list"),("🗑️ Révoquer","v2act:collaborateurs:delete")]),
+ "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete")]),
+ "ruptures": ("🚨 RUPTURES", [("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search")]),
+ "commandes": ("📋 COMMANDES", [("➕ Ajouter", "v2act:commandes:add"), ("📋 Voir", "v2act:commandes:list"), ("🔎 Rechercher", "v2act:commandes:search"), ("✏️ Modifier", "v2act:commandes:edit"), ("🗑️ Supprimer", "v2act:commandes:delete")]),
+ "livraisons": ("🚚 LIVRAISONS", [("➕ Ajouter", "v2act:livraisons:add"), ("📋 Voir", "v2act:livraisons:list"), ("🔎 Rechercher", "v2act:livraisons:search"), ("✏️ Modifier", "v2act:livraisons:edit"), ("🗑️ Supprimer", "v2act:livraisons:delete")]),
+ "reparations": ("🔧 RÉPARATIONS", [("➕ Ajouter une réparation", "v2act:reparations:add"), ("📋 Voir", "v2act:reparations:list"), ("🔎 Rechercher", "v2act:reparations:search"), ("✏️ Modifier", "v2act:reparations:edit"), ("🗑️ Supprimer", "v2act:reparations:delete"), ("⏸️ Pause", "v2act:reparations:pause"), ("▶️ Reprendre", "v2act:reparations:resume"), ("📦 Attente pièce", "v2act:reparations:parts"), ("👤 Attente client", "v2act:reparations:customer"), ("🧪 À tester", "v2act:reparations:test"), ("✅ Terminer", "v2act:reparations:done"), ("📦 Livrée", "v2act:reparations:delivered"), ("❌ Annuler", "v2act:reparations:cancel")]),
+ "deblocages": ("🔓 DÉBLOCAGES", [("➕ Nouveau dossier", "v2act:deblocages:add"), ("📋 Voir", "v2act:deblocages:list"), ("🔎 Rechercher", "v2act:deblocages:search")]),
+ "fournisseurs": ("🏢 FOURNISSEURS", [("➕ Ajouter", "v2act:fournisseurs:add"), ("📋 Voir", "v2act:fournisseurs:list"), ("🔎 Rechercher", "v2act:fournisseurs:search"), ("✏️ Modifier", "v2act:fournisseurs:edit"), ("🗑️ Supprimer", "v2act:fournisseurs:delete")]),
+ "mouvements": ("📥📤 MOUVEMENTS", [("📥 Entrée", "v2act:mouvements:in"), ("📤 Sortie", "v2act:mouvements:out"), ("📋 Historique", "v2act:mouvements:list")]),
+ "collaborateurs": ("👥 COLLABORATEURS", [("➕ Ajouter", "v2act:collaborateurs:add"), ("📋 Voir", "v2act:collaborateurs:list"), ("🗑️ Révoquer", "v2act:collaborateurs:delete"), ("🛡️ Gérer les rôles", "v2act:collaborateurs:roles")]),
 }
-V2_STATUSES=["EN ATTENTE","EN COURS","EN PAUSE","EN ATTENTE PIÈCE","EN ATTENTE CLIENT","À TESTER","TERMINÉE","LIVRÉE","ANNULÉE"]
+V2_STATUSES = ["EN ATTENTE", "EN COURS", "EN PAUSE", "EN ATTENTE PIÈCE", "EN ATTENTE CLIENT", "À TESTER", "TERMINÉE", "LIVRÉE", "ANNULÉE"]
+
 
 def v2_keyboard(section):
-    return InlineKeyboardMarkup([[InlineKeyboardButton(a,callback_data=d)] for a,d in V2_SECTIONS[section][1]]+[[InlineKeyboardButton("⬅️ Retour",callback_data="home")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton(a, callback_data=d)] for a, d in V2_SECTIONS[section][1]] + [[InlineKeyboardButton("⬅️ Retour", callback_data="home")]])
 
-def v2_text(section,qry=None):
-    # Les collaborateurs sont stockés dans DB["users"], pas dans
-    # une liste DB["collaborateurs"].
-    if section=="collaborateurs":
-        users=DB.get("users",{})
-        rows=[]
-        for chat_id, rec in users.items():
-            rec=rec if isinstance(rec,dict) else {}
-            if str(rec.get("role",""))=="admin":
-                continue
-            rows.append((str(chat_id),rec))
+
+def _user_rows(include_admin=False):
+    rows = []
+    for cid, rec in DB.get("users", {}).items():
+        rec = rec if isinstance(rec, dict) else {}
+        if include_admin or str(rec.get("role", "")) != "admin":
+            rows.append((str(cid), rec))
+    return rows
+
+
+def v2_text(section, qry=None, current_chat_id=None):
+    if section == "collaborateurs":
+        rows = _user_rows()
         if qry:
-            q=str(qry).lower()
-            rows=[
-                (chat_id,rec) for chat_id,rec in rows
-                if q in " ".join(str(v) for v in rec.values()).lower()
-                or q in chat_id.lower()
-            ]
-        title=V2_SECTIONS[section][0]
+            q = str(qry).lower()
+            rows = [(cid, rec) for cid, rec in rows if q in cid.lower() or q in " ".join(str(v) for v in rec.values()).lower()]
+        title = V2_SECTIONS[section][0]
         if not rows:
-            return title+"\\n━━━━━━━━━━━━━━━━━━━━\\n\\nAucun collaborateur."
-        lines=[title,"━━━━━━━━━━━━━━━━━━━━"]
-        for chat_id,rec in rows[:40]:
-            name=rec.get("name") or "Collaborateur"
-            username=rec.get("username")
-            added=rec.get("added_at","")
-            lines.append(
-                f"👤 <b>{esc(name)}</b>\\n"
-                f"🆔 <code>{esc(chat_id)}</code>\\n"
-                + (f"📱 @{esc(username)}\\n" if username else "")
-                + (f"📅 Ajout : {esc(added)}" if added else "")
-            )
-        return "\\n\\n".join(lines)
+            return title + "\n━━━━━━━━━━━━━━━━━━━━\n\nAucun collaborateur enregistré."
+        lines = [title, "━━━━━━━━━━━━━━━━━━━━"]
+        for cid, rec in rows[:40]:
+            name = rec.get("name") or "Collaborateur"
+            username = rec.get("username")
+            role = str(rec.get("role", "collaborateur"))
+            role_label = "🛡️ Modérateur" if role == "moderateur" else "👤 Collaborateur"
+            # Le Chat ID est visible par l'admin et les modérateurs.
+            if admin(current_chat_id) or moderator(current_chat_id):
+                lines.append(f"{role_label} — <b>{esc(name)}</b>\n🆔 <code>{esc(cid)}</code>" + (f"\n📱 @{esc(username)}" if username else ""))
+            else:
+                lines.append(f"{role_label} — <b>{esc(name)}</b>" + (f"\n📱 @{esc(username)}" if username else ""))
+        return "\n\n".join(lines)
 
-    key=section
-    items=DB.get(key,[])
-    if section=="ruptures":
-        items=[x for x in DB.get("stock",[]) if int(x.get("quantite",0))<=int(x.get("seuil",2))]
+    items = DB.get(section, [])
+    if section == "ruptures":
+        items = [x for x in DB.get("stock", []) if int(x.get("quantite", 0)) <= int(x.get("seuil", 2))]
     if qry:
-        q=qry.lower(); items=[x for x in items if q in " ".join(str(v) for v in x.values()).lower()]
-    title=V2_SECTIONS[section][0]
-    if not items:return title+"\\n━━━━━━━━━━━━━━━━━━━━\\n\\nAucun élément."
-    lines=[title,"━━━━━━━━━━━━━━━━━━━━"]
+        q = str(qry).lower()
+        items = [x for x in items if q in " ".join(str(v) for v in x.values()).lower()]
+    title = V2_SECTIONS[section][0]
+    if not items:
+        return title + "\n━━━━━━━━━━━━━━━━━━━━\n\nAucun élément."
+    lines = [title, "━━━━━━━━━━━━━━━━━━━━"]
     for x in items[:40]:
-        lines.append("\\n"+esc(str(x)[:900]))
-    return "\\n".join(lines)
+        lines.append("\n" + esc(str(x)[:900]))
+    return "\n".join(lines)
 
-async def v2_handler(update,context):
-    q=update.callback_query
-    if not q or not await require_access(update): return
-    await q.answer(); data=q.data or ""
+
+def _start_flow(context, flow, steps):
+    context.user_data.clear()
+    context.user_data["v2_flow"] = flow
+    context.user_data["v2_step"] = 1
+    context.user_data["v2_steps"] = steps
+    context.user_data["v2_form"] = {}
+
+
+async def v2_handler(update, context):
+    q = update.callback_query
+    if not q or not await require_access(update):
+        return
+    await q.answer()
+    data = q.data or ""
     if data.startswith("v2menu:"):
-        sec=data.split(":",1)[1]
+        sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
-            await q.edit_message_text(V2_SECTIONS[sec][0]+"\n\nChoisis une action :",reply_markup=v2_keyboard(sec))
+            await q.edit_message_text(V2_SECTIONS[sec][0] + "\n\nChoisis une action :", reply_markup=v2_keyboard(sec))
         return
-    if not data.startswith("v2act:"): return
-    _,sec,act=data.split(":",2)
-    if sec not in V2_SECTIONS:return
-
-    # Le menu Collaborateurs reste visible pour tout le monde,
-    # mais sa gestion est strictement réservée à l'administrateur.
-    if sec=="collaborateurs" and act in {"add","delete"} and not admin(update.effective_chat.id):
-        await q.answer("🔒 Réservé à l’administrateur.", show_alert=True)
+    if not data.startswith("v2act:"):
+        return
+    _, sec, act = data.split(":", 2)
+    if sec not in V2_SECTIONS:
         return
 
-    if sec=="collaborateurs" and act=="add":
-        context.user_data.clear()
-        context.user_data["v2_flow"]="collaborateur_add"
+    if sec == "collaborateurs" and act in {"add", "delete"} and not can_manage_users(update.effective_chat.id):
+        await q.answer("🔒 Réservé à l’administrateur ou au modérateur.", show_alert=True)
+        return
+
+    if sec == "collaborateurs" and act == "roles" and not admin(update.effective_chat.id):
+        await q.answer("🔒 Seul l'administrateur peut gérer les rôles.", show_alert=True)
+        return
+
+    if sec == "collaborateurs" and act == "add":
+        _start_flow(context, "collaborateur_add", [("chat_id", "Envoie son Chat ID Telegram.")])
+        await q.edit_message_text("👥 <b>AJOUTER UN COLLABORATEUR</b>\n\nEnvoie son <b>Chat ID Telegram</b>.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
+    if sec == "collaborateurs" and act == "delete":
+        _start_flow(context, "collaborateur_revoke", [("needle", "Envoie son Chat ID, son nom ou son @username.")])
+        await q.edit_message_text("🗑️ <b>RÉVOQUER UN COLLABORATEUR</b>\n\nEnvoie son <b>Chat ID</b>, son nom ou son @username.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
+
+    if sec == "collaborateurs" and act == "roles":
+        _start_flow(context, "collaborateur_role", [("needle", "Envoie son Chat ID, son nom ou son @username.")])
         await q.edit_message_text(
-            "👥 <b>AJOUTER UN COLLABORATEUR</b>\\n\\n"
-            "Envoie son <b>Chat ID Telegram</b>.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_menu(),
-        )
-        return
+            "🛡️ <b>GESTION DES RÔLES</b>\n\n"
+            "Envoie le <b>Chat ID</b>, le nom ou le <b>@username</b> de la personne à modifier.",
+            parse_mode=ParseMode.HTML, reply_markup=back_menu()
+        ); return
 
-    if sec=="collaborateurs" and act=="delete":
-        context.user_data.clear()
-        context.user_data["v2_flow"]="collaborateur_revoke"
-        await q.edit_message_text(
-            "🗑️ <b>RÉVOQUER UN COLLABORATEUR</b>\\n\\n"
-            "Envoie son <b>Chat ID</b> ou son nom.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_menu(),
-        )
-        return
-    if sec=="deblocages" and act=="add":
-        DB.setdefault("deblocages",[])
-        context.user_data.clear();context.user_data["v2_flow"]="deblocage";context.user_data["v2_step"]=1;context.user_data["v2_form"]={}
-        await q.edit_message_text("🔓 <b>NOUVEAU DOSSIER</b>\n\nFRP / Google ou iCloud / Apple ? Réponds <b>FRP</b> ou <b>iCloud</b>.",parse_mode=ParseMode.HTML,reply_markup=back_menu());return
-    if sec=="reparations" and act=="add":
-        context.user_data.clear();context.user_data["v2_flow"]="reparation";context.user_data["v2_step"]=1;context.user_data["v2_form"]={}
-        await q.edit_message_text("➕ <b>NOUVELLE RÉPARATION</b>\n\n1/6 — Numéro de réparation ?",parse_mode=ParseMode.HTML,reply_markup=back_menu());return
-    if act=="list":
-        await q.edit_message_text(v2_text(sec),reply_markup=v2_keyboard(sec),parse_mode=ParseMode.HTML);return
-    if act=="search":
-        context.user_data["v2_search"]=sec
-        await q.edit_message_text("🔎 Envoie le terme à rechercher.",reply_markup=back_menu());return
-    if sec=="reparations" and act in {"pause","resume","parts","customer","test","done","delivered","cancel"}:
-        st={"pause":"EN PAUSE","resume":"EN COURS","parts":"EN ATTENTE PIÈCE","customer":"EN ATTENTE CLIENT","test":"À TESTER","done":"TERMINÉE","delivered":"LIVRÉE","cancel":"ANNULÉE"}[act]
-        context.user_data["v2_status"]=st
-        await q.edit_message_text(f"📌 Nouveau statut : <b>{st}</b>\n\nEnvoie le numéro ou l'IMEI de la réparation.",parse_mode=ParseMode.HTML,reply_markup=back_menu());return
-    await q.edit_message_text("ℹ️ Action prête. Pour préserver les fonctions existantes, la modification/suppression passe d'abord par une recherche.",reply_markup=v2_keyboard(sec))
+    if sec == "stock" and act == "add":
+        _start_flow(context, "stock_add_v2", [("produit", "1/7 — Nom du produit/modèle ?"), ("reference", "2/7 — Référence interne ?"), ("quantite", "3/7 — Quantité ?"), ("prix_achat", "4/7 — Prix d'achat unitaire ?"), ("seuil", "5/7 — Seuil d'alerte ?"), ("emplacement", "6/7 — Emplacement ?"), ("fournisseur", "7/7 — Fournisseur ?")])
+        await q.edit_message_text("➕ <b>AJOUT STOCK</b>\n\n1/7 — Nom du produit/modèle ?", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
 
-async def v2_text_router(update,context):
+    flow_specs = {
+        ("commandes", "add"): ("commande_add", [("numero", "1/4 — Numéro de commande ?"), ("fournisseur", "2/4 — Fournisseur ?"), ("montant", "3/4 — Montant ?"), ("statut", "4/4 — Statut ?")], "📋 <b>NOUVELLE COMMANDE</b>\n\n1/4 — Numéro de commande ?"),
+        ("livraisons", "add"): ("livraison_add", [("commande", "1/5 — Numéro de commande ?"), ("transporteur", "2/5 — Transporteur ?"), ("suivi", "3/5 — Numéro de suivi ?"), ("date_prevue", "4/5 — Date prévue ?"), ("statut", "5/5 — Statut ?")], "🚚 <b>NOUVELLE LIVRAISON</b>\n\n1/5 — Numéro de commande ?"),
+        ("fournisseurs", "add"): ("fournisseur_add_v2", [("nom", "1/4 — Nom du fournisseur ?"), ("contact", "2/4 — Contact ?"), ("telephone", "3/4 — Téléphone ?"), ("email", "4/4 — E-mail (ou -) ?")], "🏢 <b>NOUVEAU FOURNISSEUR</b>\n\n1/4 — Nom du fournisseur ?"),
+        ("mouvements", "in"): ("movement_in", [("reference", "1/2 — Référence stock ?"), ("quantite", "2/2 — Quantité à entrer ?")], "📥 <b>ENTRÉE STOCK</b>\n\n1/2 — Référence stock ?"),
+        ("mouvements", "out"): ("movement_out", [("reference", "1/2 — Référence stock ?"), ("quantite", "2/2 — Quantité à sortir ?")], "📤 <b>SORTIE STOCK</b>\n\n1/2 — Référence stock ?"),
+        ("reparations", "add"): ("reparation", [("numero", "1/7 — Numéro de réparation ?"), ("appareil", "2/7 — Modèle/appareil ?"), ("client", "3/7 — Client ?"), ("panne", "4/7 — Panne ?"), ("imei", "5/7 — IMEI (ou -) ?"), ("devis", "6/7 — Prix/devis ?"), ("statut", "7/7 — Statut ?")], "🔧 <b>NOUVELLE RÉPARATION</b>\n\n1/7 — Numéro de réparation ?"),
+        ("deblocages", "add"): ("deblocage", [("type", "1/5 — FRP / Google ou iCloud / Apple ?"), ("appareil", "2/5 — Modèle/appareil ?"), ("imei", "3/5 — IMEI (ou -) ?"), ("client", "4/5 — Client ?"), ("montant", "5/5 — Prix du déblocage ?")], "🔓 <b>NOUVEAU DOSSIER</b>\n\n1/5 — FRP / Google ou iCloud / Apple ?"),
+    }
+    spec = flow_specs.get((sec, act))
+    if spec:
+        flow, steps, prompt = spec
+        _start_flow(context, flow, steps)
+        await q.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
+
+    if act == "list":
+        await q.edit_message_text(v2_text(sec, current_chat_id=update.effective_chat.id), reply_markup=v2_keyboard(sec), parse_mode=ParseMode.HTML); return
+    if act == "search":
+        context.user_data["v2_search"] = sec
+        await q.edit_message_text("🔎 Envoie le terme à rechercher.", reply_markup=back_menu()); return
+    if sec == "mouvements" and act == "list":
+        await q.edit_message_text(v2_text("mouvements", current_chat_id=update.effective_chat.id), reply_markup=v2_keyboard("mouvements"), parse_mode=ParseMode.HTML); return
+    if sec == "reparations" and act in {"pause", "resume", "parts", "customer", "test", "done", "delivered", "cancel"}:
+        st = {"pause":"EN PAUSE","resume":"EN COURS","parts":"EN ATTENTE PIÈCE","customer":"EN ATTENTE CLIENT","test":"À TESTER","done":"TERMINÉE","delivered":"LIVRÉE","cancel":"ANNULÉE"}[act]
+        context.user_data["v2_status"] = st
+        await q.edit_message_text(f"📌 Nouveau statut : <b>{st}</b>\n\nEnvoie le numéro ou l'IMEI de la réparation.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
+    if act in {"edit", "delete"}:
+        context.user_data["v2_search_action"] = (sec, act)
+        await q.edit_message_text("🔎 Envoie le numéro, l'IMEI ou un élément permettant d'identifier l'entrée.", reply_markup=back_menu()); return
+    await q.edit_message_text("ℹ️ Action non disponible.", reply_markup=v2_keyboard(sec))
+
+
+def _persist_and_clear(context):
+    save_db(DB)
+    context.user_data.clear()
+
+
+def _safe_float(value):
+    return float(str(value).replace(" ", "").replace(",", "."))
+
+
+def _safe_int(value):
+    return int(str(value).strip())
+
+
+async def _finish_flow(update, context, flow, f):
+    cid = update.effective_chat.id
+    if flow == "stock_add_v2":
+        try:
+            f["quantite"] = _safe_int(f["quantite"]); f["prix_achat"] = _safe_float(f["prix_achat"]); f["seuil"] = _safe_int(f["seuil"])
+        except ValueError:
+            await update.effective_message.reply_text("❌ Quantité, prix ou seuil invalide. Recommence l'ajout.", reply_markup=back_menu()); return True
+        item = {"id": f"STK-{len(DB['stock'])+1:05d}", **f, "created_at": now_iso(), "updated_at": now_iso()}
+        DB["stock"].append(item)
+        DB["mouvements"].append({"date": now_iso(), "reference": item["reference"], "type": "ENTREE_INITIALE", "quantite": item["quantite"], "chat_id": cid})
+        log_activity(cid, "STOCK_CREATE", item["reference"])
+        context.user_data.clear(); await update.effective_message.reply_text("✅ <b>Référence ajoutée au stock.</b>", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
+    if flow == "commande_add":
+        try: f["montant"] = _safe_float(f["montant"])
+        except ValueError: await update.effective_message.reply_text("❌ Montant invalide.", reply_markup=back_menu()); return True
+        DB["commandes"].append({"id":f"CMD-{len(DB['commandes'])+1:05d}", **f, "date":now_iso()})
+    elif flow == "livraison_add": DB["livraisons"].append({"id":f"LIV-{len(DB['livraisons'])+1:05d}", **f, "date":now_iso()})
+    elif flow == "fournisseur_add_v2": DB["fournisseurs"].append({"id":f"SUP-{len(DB['fournisseurs'])+1:05d}", **f, "created_at":now_iso()})
+    elif flow in {"movement_in", "movement_out"}:
+        try: qty = _safe_int(f["quantite"])
+        except ValueError: await update.effective_message.reply_text("❌ Quantité invalide.", reply_markup=back_menu()); return True
+        item = next((x for x in DB["stock"] if str(x.get("reference")) == str(f["reference"])), None)
+        if not item: await update.effective_message.reply_text("❌ Référence stock introuvable.", reply_markup=back_menu()); return True
+        if qty <= 0 or (flow == "movement_out" and int(item.get("quantite",0)) < qty): await update.effective_message.reply_text("❌ Quantité invalide ou stock insuffisant.", reply_markup=back_menu()); return True
+        item["quantite"] = int(item.get("quantite",0)) + qty if flow == "movement_in" else int(item.get("quantite",0)) - qty
+        item["updated_at"] = now_iso(); DB["mouvements"].append({"date":now_iso(),"reference":f["reference"],"type":"ENTREE" if flow=="movement_in" else "SORTIE","quantite":qty,"chat_id":cid})
+    elif flow == "reparation":
+        try: f["devis"] = _safe_float(f["devis"])
+        except ValueError: await update.effective_message.reply_text("❌ Prix/devis invalide.", reply_markup=back_menu()); return True
+        DB["reparations"].append({"id":f"REP-{len(DB['reparations'])+1:05d}", "numero":f["numero"], "appareil":f["appareil"], "client":f["client"], "panne":f["panne"], "identifiant":"" if f["imei"]=="-" else f["imei"], "type_identifiant":"IMEI" if f["imei"]!="-" else "", "devis":f["devis"], "statut":f["statut"], "date":now_iso(), "historique":[]})
+    elif flow == "deblocage":
+        if f["type"].upper() not in {"FRP", "GOOGLE", "FRP / GOOGLE", "ICLOUD", "I-CLOUD", "ICLOUD / APPLE"}:
+            await update.effective_message.reply_text("❌ Réponds FRP ou iCloud.", reply_markup=back_menu()); return True
+        try: f["montant"] = _safe_float(f["montant"])
+        except ValueError: await update.effective_message.reply_text("❌ Prix invalide.", reply_markup=back_menu()); return True
+        f["type"] = "FRP / Google" if "FRP" in f["type"].upper() or "GOOGLE" in f["type"].upper() else "iCloud / Apple"
+        f["imei"] = "" if f["imei"] == "-" else f["imei"]; f["statut"] = "EN ATTENTE"; f["date"] = now_iso(); f["numero"] = f"DB-{len(DB['deblocages'])+1:05d}"
+        DB["deblocages"].append(f.copy())
+    else:
+        return False
+    save_db(DB); context.user_data.clear()
+    labels={"commande_add":"commande","livraison_add":"livraison","fournisseur_add_v2":"fournisseur","movement_in":"entrée stock","movement_out":"sortie stock","reparation":"réparation","deblocage":"dossier de déblocage"}
+    await update.effective_message.reply_text(f"✅ <b>{labels[flow].capitalize()} enregistré(e).</b>", parse_mode=ParseMode.HTML, reply_markup=menu())
+    return True
+
+
+async def v2_text_router(update, context):
     if not update.effective_message or not authorized(update.effective_chat.id): return False
-    txt=update.effective_message.text.strip()
-    if context.user_data.get("v2_search"):
-        sec=context.user_data.pop("v2_search")
-        await update.effective_message.reply_text(v2_text(sec,txt),reply_markup=v2_keyboard(sec),parse_mode=ParseMode.HTML);return True
-    if context.user_data.get("v2_flow")=="collaborateur_add":
-        if not admin(update.effective_chat.id):
-            context.user_data.clear()
-            await update.effective_message.reply_text(
-                "🔒 Action réservée à l’administrateur.", reply_markup=menu()
-            )
-            return True
-        chat_id_txt=txt.strip()
-        if not re.fullmatch(r"-?\\d+", chat_id_txt):
-            await update.effective_message.reply_text(
-                "❌ Chat ID invalide. Envoie uniquement le numéro du Chat ID.",
-                reply_markup=back_menu(),
-            )
-            return True
-        if chat_id_txt==str(ADMIN_CHAT_ID):
-            context.user_data.clear()
-            await update.effective_message.reply_text(
-                "ℹ️ Ce Chat ID est déjà celui de l’administrateur.",
-                reply_markup=menu()
-            )
-            return True
-        old=DB.get("users",{}).get(chat_id_txt) or {}
-        DB.setdefault("users",{})[chat_id_txt]={
-            **old,
-            "role":"collaborateur",
-            "name":old.get("name","Collaborateur"),
-            "added_at":old.get("added_at",now_iso()),
-        }
-        save_db(DB)
-        context.user_data.clear()
-        await update.effective_message.reply_text(
-            f"✅ Collaborateur <code>{esc(chat_id_txt)}</code> ajouté.",
-            parse_mode=ParseMode.HTML, reply_markup=menu()
-        )
-        return True
+    txt = update.effective_message.text.strip()
 
-    if context.user_data.get("v2_flow")=="collaborateur_revoke":
+    if context.user_data.get("v2_search"):
+        sec = context.user_data.pop("v2_search")
+        await update.effective_message.reply_text(v2_text(sec, txt, current_chat_id=update.effective_chat.id), reply_markup=v2_keyboard(sec), parse_mode=ParseMode.HTML); return True
+
+    if context.user_data.get("v2_search_action"):
+        sec, act = context.user_data.pop("v2_search_action")
+        items = DB.get(sec, [])
+        found = next((x for x in items if txt.lower() in " ".join(str(v) for v in x.values()).lower()), None)
+        if not found: await update.effective_message.reply_text("❌ Élément introuvable.", reply_markup=v2_keyboard(sec)); return True
+        if act == "delete":
+            items.remove(found); save_db(DB); await update.effective_message.reply_text("🗑️ Élément supprimé.", reply_markup=v2_keyboard(sec)); return True
+        context.user_data["v2_edit_target"]=(sec, found)
+        await update.effective_message.reply_text("✏️ Envoie le nouveau texte pour remplacer le champ <b>statut</b> (ou la valeur à corriger).", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
+
+    if context.user_data.get("v2_edit_target"):
+        sec, found = context.user_data.pop("v2_edit_target"); found["statut"] = txt; save_db(DB); await update.effective_message.reply_text("✅ Élément modifié.", reply_markup=v2_keyboard(sec)); return True
+
+    if context.user_data.get("v2_flow") == "collaborateur_add":
+        if not can_manage_users(update.effective_chat.id): context.user_data.clear(); await update.effective_message.reply_text("🔒 Action réservée à l’administrateur ou au modérateur.", reply_markup=menu()); return True
+        if not re.fullmatch(r"-?\d+", txt): await update.effective_message.reply_text("❌ Chat ID invalide. Envoie uniquement le numéro.", reply_markup=back_menu()); return True
+        cid = str(txt); old = DB.get("users", {}).get(cid) or {}
+        DB.setdefault("users", {})[cid] = {**old, "role":"collaborateur", "name":old.get("name","Collaborateur"), "username":old.get("username",""), "added_at":old.get("added_at",now_iso())}
+        save_db(DB); context.user_data.clear()
+        await update.effective_message.reply_text(f"✅ Collaborateur <code>{esc(cid)}</code> ajouté.\n\nIl doit utiliser /start sur le bot.", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
+
+    if context.user_data.get("v2_flow") == "collaborateur_role":
         if not admin(update.effective_chat.id):
-            context.user_data.clear()
-            await update.effective_message.reply_text(
-                "🔒 Action réservée à l’administrateur.", reply_markup=menu()
-            )
-            return True
-        needle=txt.lower()
-        found=None
-        for chat_id,rec in DB.get("users",{}).items():
-            if str(chat_id)==str(ADMIN_CHAT_ID):
-                continue
-            rec=rec if isinstance(rec,dict) else {}
-            hay=" ".join([str(chat_id),str(rec.get("name","")),str(rec.get("username",""))]).lower()
-            if needle in hay:
-                found=(str(chat_id),rec)
-                break
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Seul l’administrateur peut gérer les rôles.", reply_markup=menu()); return True
+        needle=txt.lower(); found=None
+        for cid,rec in _user_rows():
+            hay=" ".join([cid,str(rec.get("name","")),str(rec.get("username",""))]).lower()
+            if needle in hay: found=(cid,rec); break
         if not found:
-            context.user_data.clear()
-            await update.effective_message.reply_text(
-                "❌ Collaborateur introuvable.", reply_markup=menu()
-            )
-            return True
-        chat_id,rec=found
-        DB["users"].pop(chat_id,None)
+            context.user_data.clear(); await update.effective_message.reply_text("❌ Collaborateur introuvable.", reply_markup=menu()); return True
+        cid,rec=found
+        if cid == str(ADMIN_CHAT_ID) or rec.get("role") == "admin":
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Le compte administrateur ne peut pas être rétrogradé.", reply_markup=menu()); return True
+        new_role = "moderateur" if rec.get("role") != "moderateur" else "collaborateur"
+        rec["role"] = new_role
         save_db(DB)
         context.user_data.clear()
+        label = "🛡️ Modérateur" if new_role == "moderateur" else "👤 Collaborateur"
         await update.effective_message.reply_text(
-            f"🗑️ Collaborateur <b>{esc(rec.get('name','Collaborateur'))}</b> "
-            f"(<code>{esc(chat_id)}</code>) révoqué.",
+            f"✅ <b>{esc(rec.get('name','Collaborateur'))}</b> est maintenant <b>{label}</b>.\n\n"
+            "Le modérateur peut ajouter et révoquer des collaborateurs, mais ne peut pas gérer les rôles ni l'administrateur.",
             parse_mode=ParseMode.HTML, reply_markup=menu()
-        )
-        return True
+        ); return True
+
+    if context.user_data.get("v2_flow") == "collaborateur_revoke":
+        if not can_manage_users(update.effective_chat.id): context.user_data.clear(); await update.effective_message.reply_text("🔒 Action réservée à l’administrateur ou au modérateur.", reply_markup=menu()); return True
+        needle=txt.lower(); found=None
+        for cid,rec in _user_rows():
+            hay=" ".join([cid,str(rec.get("name","")),str(rec.get("username",""))]).lower()
+            if needle in hay: found=(cid,rec); break
+        if not found: context.user_data.clear(); await update.effective_message.reply_text("❌ Collaborateur introuvable.", reply_markup=menu()); return True
+        cid,rec=found
+        if cid == str(ADMIN_CHAT_ID) or rec.get("role") == "admin":
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Impossible de révoquer l’administrateur.", reply_markup=menu()); return True
+        if moderator(update.effective_chat.id) and rec.get("role") == "moderateur":
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Un modérateur ne peut pas révoquer un autre modérateur.", reply_markup=menu()); return True
+        DB["users"].pop(cid,None); save_db(DB); context.user_data.clear(); await update.effective_message.reply_text(f"🗑️ {esc(rec.get('name','Collaborateur'))} révoqué.", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
 
     if context.user_data.get("v2_status"):
-        st=context.user_data.pop("v2_status");needle=txt.lower()
+        st=context.user_data.pop("v2_status"); needle=txt.lower()
         for x in DB.get("reparations",[]):
             if needle in " ".join(str(v) for v in x.values()).lower():
-                old=x.get("statut","");x["statut"]=st;x.setdefault("historique",[]).append({"date":now_iso(),"action":"statut","ancien":old,"nouveau":st,"user":str(update.effective_chat.id)});save_db(DB)
-                await update.effective_message.reply_text(f"✅ {esc(old)} → <b>{esc(st)}</b>",parse_mode=ParseMode.HTML,reply_markup=menu());return True
-        await update.effective_message.reply_text("❌ Réparation introuvable.",reply_markup=menu());return True
+                old=x.get("statut",""); x["statut"]=st; x.setdefault("historique",[]).append({"date":now_iso(),"action":"statut","ancien":old,"nouveau":st,"user":str(update.effective_chat.id)}); save_db(DB); await update.effective_message.reply_text(f"✅ {esc(old)} → <b>{esc(st)}</b>", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
+        await update.effective_message.reply_text("❌ Réparation introuvable.", reply_markup=menu()); return True
+
     flow=context.user_data.get("v2_flow")
-    if flow=="reparation":
-        f=context.user_data.setdefault("v2_form",{});step=context.user_data.get("v2_step",1)
-        keys=[("numero","2/6 — Modèle/appareil ?"),("appareil","3/6 — Client ?"),("client","4/6 — Panne ?"),("panne","5/6 — IMEI (ou -) ?"),("imei","6/6 — Statut ?")]
-        if step<=5:
-            k,p=keys[step-1];f[k]=txt;context.user_data["v2_step"]=step+1;await update.effective_message.reply_text(p,reply_markup=back_menu());return True
-        st=txt.upper()
-        if st not in V2_STATUSES:
-            await update.effective_message.reply_text("❌ Statut invalide.",reply_markup=back_menu());return True
-        item={"numero":f["numero"],"appareil":f["appareil"],"client":f["client"],"panne":f["panne"],"identifiant":"" if f["imei"]=="-" else f["imei"],"type_identifiant":"IMEI" if f["imei"]!="-" else "","statut":st,"date":now_iso(),"historique":[]}
-        DB.setdefault("reparations",[]).append(item);save_db(DB);context.user_data.clear()
-        await update.effective_message.reply_text("✅ <b>Réparation enregistrée.</b>",parse_mode=ParseMode.HTML,reply_markup=menu());return True
-    if flow=="deblocage":
-        f=context.user_data.setdefault("v2_form",{});step=context.user_data.get("v2_step",1)
-        if step==1:
-            if txt.upper() not in {"FRP","ICLOUD","I-CLOUD"}: await update.effective_message.reply_text("Réponds FRP ou iCloud.",reply_markup=back_menu());return True
-            f["type"]="FRP / Google" if txt.upper()=="FRP" else "iCloud / Apple";p="2/4 — Modèle/appareil ?"
-        elif step==2:f["appareil"]=txt;p="3/4 — IMEI (ou -) ?"
-        elif step==3:f["imei"]="" if txt=="-" else txt;p="4/4 — Client ?"
-        else:
-            f["client"]=txt;f["statut"]="EN ATTENTE";f["date"]=now_iso();f["numero"]=f"DB-{len(DB.get('deblocages',[]))+1:05d}";DB.setdefault("deblocages",[]).append(f.copy());save_db(DB);context.user_data.clear();await update.effective_message.reply_text(f"✅ <b>Dossier {esc(f['numero'])} enregistré.</b>",parse_mode=ParseMode.HTML,reply_markup=menu());return True
-        context.user_data["v2_step"]=step+1;await update.effective_message.reply_text(p,reply_markup=back_menu());return True
+    if flow:
+        steps=context.user_data.get("v2_steps",[]); step=context.user_data.get("v2_step",1); f=context.user_data.setdefault("v2_form",{})
+        if step <= len(steps):
+            key,prompt=steps[step-1]
+            if flow == "deblocage" and key == "type":
+                if txt.upper() not in {"FRP","GOOGLE","FRP / GOOGLE","ICLOUD","I-CLOUD","ICLOUD / APPLE"}:
+                    await update.effective_message.reply_text("❌ Réponds <b>FRP</b> ou <b>iCloud</b>.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
+            f[key]=txt; context.user_data["v2_step"]=step+1
+            if step == len(steps):
+                await _finish_flow(update,context,flow,f)
+            else:
+                await update.effective_message.reply_text(steps[step][1], parse_mode=ParseMode.HTML, reply_markup=back_menu())
+            return True
     return False
 
 async def v2_text_wrapper(update,context):
