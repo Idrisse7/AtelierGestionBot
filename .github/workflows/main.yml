@@ -128,10 +128,13 @@ jobs:
           ATELIER_PASSWORD: ${{ secrets.ATELIER_PASSWORD }}
           MAX_RUNTIME_SECONDS: 19800
         run: |
+          set +e
+
           python AtelierBot_PRO_PUBLIC_SECRET.py &
           BOT_PID=$!
 
           START_TIME=$(date +%s)
+          STOPPED_BY_TIMEOUT=0
 
           while kill -0 "$BOT_PID" 2>/dev/null; do
             sleep 30
@@ -140,8 +143,17 @@ jobs:
             ELAPSED=$((NOW - START_TIME))
 
             if [ "$ELAPSED" -ge "$MAX_RUNTIME_SECONDS" ]; then
-              echo "5h30 atteintes : arret propre du bot."
-              kill "$BOT_PID" 2>/dev/null || true
+              echo "5h30 atteintes : arret programme du bot."
+              STOPPED_BY_TIMEOUT=1
+
+              kill -INT "$BOT_PID" 2>/dev/null || true
+              sleep 10
+
+              if kill -0 "$BOT_PID" 2>/dev/null; then
+                echo "Le bot est encore actif : arret force."
+                kill -TERM "$BOT_PID" 2>/dev/null || true
+              fi
+
               break
             fi
           done
@@ -149,10 +161,20 @@ jobs:
           wait "$BOT_PID"
           BOT_EXIT=$?
 
-          exit "$BOT_EXIT"
+          if [ "$STOPPED_BY_TIMEOUT" -eq 1 ]; then
+            echo "Arret programme apres 5h30. Code de sortie: $BOT_EXIT"
+            exit 0
+          fi
 
-      - name: Rechiffrer seulement si le bot a reussi
-        if: success()
+          if [ "$BOT_EXIT" -ne 0 ]; then
+            echo "ERREUR: le bot s'est arrete avec le code $BOT_EXIT."
+            exit "$BOT_EXIT"
+          fi
+
+          echo "Bot termine normalement."
+
+      - name: Rechiffrer la base
+        if: always()
         env:
           DATA_KEY: ${{ secrets.DATA_KEY }}
         run: |
