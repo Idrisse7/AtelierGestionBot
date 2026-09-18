@@ -2,6 +2,7 @@ import os
 import json
 import html
 import logging
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -1260,6 +1261,39 @@ def v2_keyboard(section):
     return InlineKeyboardMarkup([[InlineKeyboardButton(a,callback_data=d)] for a,d in V2_SECTIONS[section][1]]+[[InlineKeyboardButton("⬅️ Retour",callback_data="home")]])
 
 def v2_text(section,qry=None):
+    # Les collaborateurs sont stockés dans DB["users"], pas dans
+    # une liste DB["collaborateurs"].
+    if section=="collaborateurs":
+        users=DB.get("users",{})
+        rows=[]
+        for chat_id, rec in users.items():
+            rec=rec if isinstance(rec,dict) else {}
+            if str(rec.get("role",""))=="admin":
+                continue
+            rows.append((str(chat_id),rec))
+        if qry:
+            q=str(qry).lower()
+            rows=[
+                (chat_id,rec) for chat_id,rec in rows
+                if q in " ".join(str(v) for v in rec.values()).lower()
+                or q in chat_id.lower()
+            ]
+        title=V2_SECTIONS[section][0]
+        if not rows:
+            return title+"\\n━━━━━━━━━━━━━━━━━━━━\\n\\nAucun collaborateur."
+        lines=[title,"━━━━━━━━━━━━━━━━━━━━"]
+        for chat_id,rec in rows[:40]:
+            name=rec.get("name") or "Collaborateur"
+            username=rec.get("username")
+            added=rec.get("added_at","")
+            lines.append(
+                f"👤 <b>{esc(name)}</b>\\n"
+                f"🆔 <code>{esc(chat_id)}</code>\\n"
+                + (f"📱 @{esc(username)}\\n" if username else "")
+                + (f"📅 Ajout : {esc(added)}" if added else "")
+            )
+        return "\\n\\n".join(lines)
+
     key=section
     items=DB.get(key,[])
     if section=="ruptures":
@@ -1267,11 +1301,11 @@ def v2_text(section,qry=None):
     if qry:
         q=qry.lower(); items=[x for x in items if q in " ".join(str(v) for v in x.values()).lower()]
     title=V2_SECTIONS[section][0]
-    if not items:return title+"\n━━━━━━━━━━━━━━━━━━━━\n\nAucun élément."
+    if not items:return title+"\\n━━━━━━━━━━━━━━━━━━━━\\n\\nAucun élément."
     lines=[title,"━━━━━━━━━━━━━━━━━━━━"]
     for x in items[:40]:
-        lines.append("\n"+esc(str(x)[:900]))
-    return "\n".join(lines)
+        lines.append("\\n"+esc(str(x)[:900]))
+    return "\\n".join(lines)
 
 async def v2_handler(update,context):
     q=update.callback_query
@@ -1285,6 +1319,34 @@ async def v2_handler(update,context):
     if not data.startswith("v2act:"): return
     _,sec,act=data.split(":",2)
     if sec not in V2_SECTIONS:return
+
+    # Le menu Collaborateurs reste visible pour tout le monde,
+    # mais sa gestion est strictement réservée à l'administrateur.
+    if sec=="collaborateurs" and act in {"add","delete"} and not admin(update.effective_chat.id):
+        await q.answer("🔒 Réservé à l’administrateur.", show_alert=True)
+        return
+
+    if sec=="collaborateurs" and act=="add":
+        context.user_data.clear()
+        context.user_data["v2_flow"]="collaborateur_add"
+        await q.edit_message_text(
+            "👥 <b>AJOUTER UN COLLABORATEUR</b>\\n\\n"
+            "Envoie son <b>Chat ID Telegram</b>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_menu(),
+        )
+        return
+
+    if sec=="collaborateurs" and act=="delete":
+        context.user_data.clear()
+        context.user_data["v2_flow"]="collaborateur_revoke"
+        await q.edit_message_text(
+            "🗑️ <b>RÉVOQUER UN COLLABORATEUR</b>\\n\\n"
+            "Envoie son <b>Chat ID</b> ou son nom.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=back_menu(),
+        )
+        return
     if sec=="deblocages" and act=="add":
         DB.setdefault("deblocages",[])
         context.user_data.clear();context.user_data["v2_flow"]="deblocage";context.user_data["v2_step"]=1;context.user_data["v2_form"]={}
@@ -1309,6 +1371,76 @@ async def v2_text_router(update,context):
     if context.user_data.get("v2_search"):
         sec=context.user_data.pop("v2_search")
         await update.effective_message.reply_text(v2_text(sec,txt),reply_markup=v2_keyboard(sec),parse_mode=ParseMode.HTML);return True
+    if context.user_data.get("v2_flow")=="collaborateur_add":
+        if not admin(update.effective_chat.id):
+            context.user_data.clear()
+            await update.effective_message.reply_text(
+                "🔒 Action réservée à l’administrateur.", reply_markup=menu()
+            )
+            return True
+        chat_id_txt=txt.strip()
+        if not re.fullmatch(r"-?\\d+", chat_id_txt):
+            await update.effective_message.reply_text(
+                "❌ Chat ID invalide. Envoie uniquement le numéro du Chat ID.",
+                reply_markup=back_menu(),
+            )
+            return True
+        if chat_id_txt==str(ADMIN_CHAT_ID):
+            context.user_data.clear()
+            await update.effective_message.reply_text(
+                "ℹ️ Ce Chat ID est déjà celui de l’administrateur.",
+                reply_markup=menu()
+            )
+            return True
+        old=DB.get("users",{}).get(chat_id_txt) or {}
+        DB.setdefault("users",{})[chat_id_txt]={
+            **old,
+            "role":"collaborateur",
+            "name":old.get("name","Collaborateur"),
+            "added_at":old.get("added_at",now_iso()),
+        }
+        save_db(DB)
+        context.user_data.clear()
+        await update.effective_message.reply_text(
+            f"✅ Collaborateur <code>{esc(chat_id_txt)}</code> ajouté.",
+            parse_mode=ParseMode.HTML, reply_markup=menu()
+        )
+        return True
+
+    if context.user_data.get("v2_flow")=="collaborateur_revoke":
+        if not admin(update.effective_chat.id):
+            context.user_data.clear()
+            await update.effective_message.reply_text(
+                "🔒 Action réservée à l’administrateur.", reply_markup=menu()
+            )
+            return True
+        needle=txt.lower()
+        found=None
+        for chat_id,rec in DB.get("users",{}).items():
+            if str(chat_id)==str(ADMIN_CHAT_ID):
+                continue
+            rec=rec if isinstance(rec,dict) else {}
+            hay=" ".join([str(chat_id),str(rec.get("name","")),str(rec.get("username",""))]).lower()
+            if needle in hay:
+                found=(str(chat_id),rec)
+                break
+        if not found:
+            context.user_data.clear()
+            await update.effective_message.reply_text(
+                "❌ Collaborateur introuvable.", reply_markup=menu()
+            )
+            return True
+        chat_id,rec=found
+        DB["users"].pop(chat_id,None)
+        save_db(DB)
+        context.user_data.clear()
+        await update.effective_message.reply_text(
+            f"🗑️ Collaborateur <b>{esc(rec.get('name','Collaborateur'))}</b> "
+            f"(<code>{esc(chat_id)}</code>) révoqué.",
+            parse_mode=ParseMode.HTML, reply_markup=menu()
+        )
+        return True
+
     if context.user_data.get("v2_status"):
         st=context.user_data.pop("v2_status");needle=txt.lower()
         for x in DB.get("reparations",[]):
