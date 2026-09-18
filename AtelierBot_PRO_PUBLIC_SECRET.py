@@ -296,7 +296,7 @@ def dashboard_metrics() -> dict[str, Any]:
     }
 
 
-def home_text() -> str:
+def home_text(current_chat_id: int | None = None) -> str:
     stock = DB["stock"]
     total_units = sum(int(x.get("quantite", 0)) for x in stock)
     value = sum(
@@ -329,10 +329,14 @@ def home_text() -> str:
         f"🔓 Déblocages ce mois : <b>{m['unlock_month']}</b>\n"
         f"🔐 FRP / Google : <b>{m['frp_day']}</b> aujourd'hui • <b>{m['frp_month']}</b> ce mois\n"
         f"☁️ iCloud / Apple : <b>{m['icloud_day']}</b> aujourd'hui • <b>{m['icloud_month']}</b> ce mois\n"
-        f"💶 CA aujourd'hui : <b>{money(m['revenue_day'])}</b>\n"
-        f"💶 CA ce mois : <b>{money(m['revenue_month'])}</b>\n\n"
-        f"💰 Valeur d'achat du stock : <b>{money(value)}</b>\n\n"
-        "🟢 <i>Base prête pour tes vraies données.</i>"
+        + (
+            f"💶 CA aujourd'hui : <b>{money(m['revenue_day'])}</b>\n"
+            f"💶 CA ce mois : <b>{money(m['revenue_month'])}</b>\n\n"
+            f"💰 Valeur d'achat du stock : <b>{money(value)}</b>\n\n"
+            if (admin(current_chat_id) or moderator(current_chat_id))
+            else ""
+        )
+        + "🟢 <i>Base prête pour tes vraies données.</i>"
     )
 
 async def require_access(update: Update) -> bool:
@@ -355,7 +359,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_access(update):
         return
     await update.effective_message.reply_text(
-        home_text(), parse_mode=ParseMode.HTML, reply_markup=menu()
+        home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu()
     )
 
 
@@ -440,7 +444,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "home":
         await q.edit_message_text(
-            home_text(), parse_mode=ParseMode.HTML, reply_markup=menu()
+            home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu()
         )
         return
 
@@ -543,18 +547,23 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             1 for x in DB["livraisons"]
             if str(x.get("statut", "")).lower() in {"livrée", "livree", "reçue", "recue"}
         )
+
         text = (
             "📊 <b>STATISTIQUES</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"📦 Unités : <b>{units}</b>\n"
             f"🧩 Références : <b>{len(stock)}</b>\n"
-            f"💰 Valeur achat : <b>{money(value)}</b>\n"
-            f"📋 Commandes : <b>{len(DB['commandes'])}</b>\n"
-            f"🚚 Livraisons reçues : <b>{delivered}</b>\n"
-            f"🔧 Réparations actives : <b>{repair_open}</b>\n"
-            f"🏢 Fournisseurs : <b>{len(DB['fournisseurs'])}</b>\n"
-            f"👥 Utilisateurs : <b>{len(DB['users'])}</b>\n"
-            f"📝 Événements journalisés : <b>{len(DB['activity_log'])}</b>"
+            + (
+                f"💰 Valeur achat : <b>{money(value)}</b>\n"
+                if (admin(update.effective_chat.id) or moderator(update.effective_chat.id))
+                else ""
+            )
+            + f"📋 Commandes : <b>{len(DB['commandes'])}</b>\n"
+            + f"🚚 Livraisons reçues : <b>{delivered}</b>\n"
+            + f"🔧 Réparations actives : <b>{repair_open}</b>\n"
+            + f"🏢 Fournisseurs : <b>{len(DB['fournisseurs'])}</b>\n"
+            + f"👥 Utilisateurs : <b>{len(DB['users'])}</b>\n"
+            + f"📝 Événements journalisés : <b>{len(DB['activity_log'])}</b>"
         )
         await q.edit_message_text(
             text, parse_mode=ParseMode.HTML, reply_markup=back_menu()
