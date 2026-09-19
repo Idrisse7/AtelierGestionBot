@@ -2220,8 +2220,6 @@ def compta_export_fec(db):
         "","","",d,str(e.get("label","")),debit,credit,"","",d,"",""]))
     return "\n".join(rows)
 
-if __name__ == "__main__":
-    main()
 
 # ============================================================
 # 💰 INTERFACE TELEGRAM — COMPTABILITÉ
@@ -2328,7 +2326,7 @@ async def compta_handle_callback(update, context):
     q = update.callback_query
     if not q or not q.data.startswith("compta:"):
         return False
-    await q.answer()
+    # callback() already answered the query before delegating here.
     db = context.application.bot_data.get("db")
     if db is None:
         db = context.application.bot_data.setdefault("db", {})
@@ -2450,3 +2448,6 @@ def compta_attach_invoice_bytes(db, invoice_number, file_bytes, file_name, mime_
     attachment = compta_attachment_to_json(file_bytes, file_name, mime_type)
     invoice["attachment"] = attachment
     return attachment
+
+if __name__ == "__main__":
+    main()
