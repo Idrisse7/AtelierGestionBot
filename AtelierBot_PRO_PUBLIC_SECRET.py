@@ -2057,6 +2057,8 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(v2_handler, pattern=r"^v2(menu|act):"))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, scanner_webapp))
+    # PDF / photos : interceptés avant le routeur texte pour les pièces jointes comptables.
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, compta_receive_attachment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v2_text_wrapper))
 
     return app
@@ -2132,8 +2134,8 @@ def main():
 
 
 # ====== COMPTABILITE (module complementaire) ======
-COMPTA_DEFAULT={"next_invoice":1,"next_credit_note":1,"invoices":[],"credit_notes":[],
-"payments":[],"expenses":[],"bank_lines":[],"vat_rate":20.0,"journal":[]}
+COMPTA_DEFAULT={"next_invoice":1,"next_credit_note":1,"next_attachment":1,"invoices":[],"credit_notes":[],
+"payments":[],"expenses":[],"bank_lines":[],"documents":[],"vat_rate":20.0,"journal":[]}
 
 def compta_data(db):
     c=db.setdefault("comptabilite",{})
@@ -2220,7 +2222,6 @@ def compta_export_fec(db):
         "","","",d,str(e.get("label","")),debit,credit,"","",d,"",""]))
     return "\n".join(rows)
 
-
 # ============================================================
 # 💰 INTERFACE TELEGRAM — COMPTABILITÉ
 # ============================================================
@@ -2252,26 +2253,30 @@ def compta_section_keyboard(section):
     if section == "invoices":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Nouvelle facture", callback_data="compta:add_invoice")],
-            [InlineKeyboardButton("📎 Joindre PDF/JPG", callback_data="compta:attach_invoice")],
+            [InlineKeyboardButton("📎 Joindre / récupérer PDF-JPG", callback_data="compta:invoice_attachments")],
             [InlineKeyboardButton("📋 Voir les factures", callback_data="compta:list_invoices")],
+            [InlineKeyboardButton("📎 Ajouter / récupérer un justificatif", callback_data="compta:invoice_attachments")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "credits":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Nouvel avoir", callback_data="compta:add_credit")],
             [InlineKeyboardButton("📋 Voir les avoirs", callback_data="compta:list_credits")],
+            [InlineKeyboardButton("📎 Justificatifs", callback_data="compta:credit_attachments")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "payments":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Ajouter encaissement", callback_data="compta:add_payment")],
             [InlineKeyboardButton("📋 Voir les encaissements", callback_data="compta:list_payments")],
+            [InlineKeyboardButton("📎 Justificatifs", callback_data="compta:payment_attachments")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "expenses":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Ajouter dépense", callback_data="compta:add_expense")],
             [InlineKeyboardButton("📋 Voir les dépenses", callback_data="compta:list_expenses")],
+            [InlineKeyboardButton("📎 Factures / justificatifs", callback_data="compta:expense_attachments")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "bank":
@@ -2279,6 +2284,7 @@ def compta_section_keyboard(section):
             [InlineKeyboardButton("➕ Ajouter ligne bancaire", callback_data="compta:add_bank")],
             [InlineKeyboardButton("🔄 Rapprocher", callback_data="compta:reconcile")],
             [InlineKeyboardButton("📋 Voir la banque", callback_data="compta:list_bank")],
+            [InlineKeyboardButton("📎 Relevés / justificatifs", callback_data="compta:bank_attachments")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     return compta_menu_keyboard()
@@ -2326,7 +2332,7 @@ async def compta_handle_callback(update, context):
     q = update.callback_query
     if not q or not q.data.startswith("compta:"):
         return False
-    # callback() already answered the query before delegating here.
+    await q.answer()
     db = context.application.bot_data.get("db")
     if db is None:
         db = context.application.bot_data.setdefault("db", {})
@@ -2362,15 +2368,36 @@ async def compta_handle_callback(update, context):
         )
         await q.edit_message_text(body, reply_markup=compta_menu_keyboard(), parse_mode="HTML")
     elif action == "fec":
-        # The existing project can later plug this text into its existing document/file sender.
         fec = compta_export_fec(db)
-        context.user_data["compta_fec_pending"] = fec
+        data = fec.encode("utf-8")
+        attachment = compta_store_document(db, data, "export_fec.txt", "text/plain", "FEC", "Export FEC")
+        save_db(DB)
+        await q.message.reply_document(
+            document=io.BytesIO(data),
+            filename="export_fec.txt",
+            caption="📤 Export FEC — fichier généré par AtelierBot.\n⚠️ À faire valider par l'expert-comptable avant utilisation comme FEC légal."
+        )
         await q.edit_message_text(
-            "📤 <b>EXPORT FEC</b>\n\n"
-            "L'export a été généré en mémoire. Il contient les colonnes FEC-style du module comptable.\n"
-            "Utilise l'action d'envoi de fichier existante du bot pour transmettre le contenu.\n\n"
-            "⚠️ À faire valider par l'expert-comptable avant utilisation comme FEC légal.",
+            f"📤 <b>EXPORT FEC</b>\n\n✅ Fichier envoyé dans Telegram.\n🆔 <code>{esc(attachment['id'])}</code>\n\n"
+            "Il est également conservé dans la base JSON pour pouvoir être récupéré plus tard.",
             reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+    elif action == "attachments":
+        await compta_show_all_attachments(q, db)
+    elif action in {"invoice_attachments","credit_attachments","payment_attachments","expense_attachments","bank_attachments"}:
+        kind = action.split("_", 1)[0]
+        await compta_choose_attachment_target(q, context, db, kind)
+    elif action.startswith("download_attachment:"):
+        aid = action.split(":", 1)[1]
+        await compta_send_attachment(q.message, db, aid)
+    elif action.startswith("attach_to:"):
+        target = action.split(":", 1)[1]
+        context.user_data["compta_attachment_target"] = target
+        await q.edit_message_text(
+            "📎 <b>AJOUTER UNE PIÈCE JOINTE</b>\n\n"
+            "Envoie maintenant le PDF, JPG, JPEG ou PNG dans ce chat.\n"
+            "Le fichier sera copié intégralement dans <code>data.json</code> et pourra être récupéré plus tard.",
+            parse_mode="HTML", reply_markup=compta_menu_keyboard()
+        )
     elif action in {"add_invoice","add_credit","add_payment","add_expense","add_bank"}:
         context.user_data["compta_pending"] = action
         await q.edit_message_text(
@@ -2387,67 +2414,272 @@ async def compta_handle_callback(update, context):
     return True
 
 # ============================================================
-# 📎 PIÈCES JOINTES FACTURES — PDF / JPG / JPEG / PNG
+# 📎 PIÈCES JOINTES — PDF / JPG / JPEG / PNG — STOCKAGE JSON + RÉCUPÉRATION
 # ============================================================
 COMPTA_ALLOWED_ATTACHMENTS = {".pdf", ".jpg", ".jpeg", ".png"}
+COMPTA_MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024  # évite de rendre data.json énorme
 
-def compta_attach_invoice_file(db, invoice_number, file_id, file_name, file_size=None, mime_type=""):
-    """Store Telegram file metadata linked to an invoice.
-    The Telegram file_id is reusable for later download/send operations."""
+
+def _compta_record_collections():
+    return {
+        "invoice": "invoices",
+        "credit": "credit_notes",
+        "payment": "payments",
+        "expense": "expenses",
+        "bank": "bank_lines",
+    }
+
+
+def _compta_attachment_list(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Migre l'ancien champ attachment vers attachments sans perdre les données."""
+    items = record.get("attachments")
+    if not isinstance(items, list):
+        items = []
+    old = record.get("attachment")
+    if isinstance(old, dict) and old not in items:
+        items.append(old)
+        record["attachments"] = items
+    record.setdefault("attachments", items)
+    return items
+
+
+def compta_next_attachment_id(db) -> str:
     c = compta_data(db)
-    invoice = next((x for x in c["invoices"] if x.get("number") == invoice_number), None)
-    if invoice is None:
-        raise ValueError("Facture introuvable.")
+    n = int(c.get("next_attachment", 1))
+    c["next_attachment"] = n + 1
+    return f"PJ-{n:06d}"
+
+
+def compta_attachment_to_json(file_bytes, file_name, mime_type="", attachment_id=""):
     ext = Path(str(file_name)).suffix.lower()
     if ext not in COMPTA_ALLOWED_ATTACHMENTS:
         raise ValueError("Format non pris en charge. Utilise PDF, JPG, JPEG ou PNG.")
-    attachment = {
-        "file_id": str(file_id),
+    if len(file_bytes) > COMPTA_MAX_ATTACHMENT_BYTES:
+        raise ValueError("Fichier trop volumineux. Limite : 15 Mo.")
+    return {
+        "id": str(attachment_id),
         "file_name": str(file_name),
-        "file_size": int(file_size or 0),
-        "mime_type": str(mime_type or ""),
+        "mime_type": str(mime_type or "application/octet-stream"),
+        "size": len(file_bytes),
+        "encoding": "base64",
+        "data_base64": base64.b64encode(file_bytes).decode("ascii"),
+        "created_at": now_iso(),
     }
-    invoice["attachment"] = attachment
+
+
+def compta_attachment_from_json(attachment):
+    if not attachment or attachment.get("encoding") != "base64":
+        return None
+    try:
+        return base64.b64decode(attachment.get("data_base64", ""), validate=True)
+    except (ValueError, TypeError):
+        return None
+
+
+def compta_store_attachment(db, kind, record, file_bytes, file_name, mime_type=""):
+    """Stocke le fichier complet en Base64 dans le JSON, lié à l'enregistrement."""
+    aid = compta_next_attachment_id(db)
+    attachment = compta_attachment_to_json(file_bytes, file_name, mime_type, aid)
+    attachment["record_kind"] = kind
+    attachment["record_number"] = str(record.get("number") or record.get("id") or record.get("date") or "")
+    _compta_attachment_list(record).append(attachment)
+    # On garde aussi une entrée d'index légère pour les recherches globales.
+    compta_data(db).setdefault("documents", [])
+    compta_data(db)["documents"] = [
+        x for x in compta_data(db)["documents"] if x.get("id") != aid
+    ]
+    compta_data(db)["documents"].append({
+        "id": aid,
+        "type": kind,
+        "record_number": attachment["record_number"],
+        "file_name": attachment["file_name"],
+        "mime_type": attachment["mime_type"],
+        "size": attachment["size"],
+        "created_at": attachment["created_at"],
+    })
     return attachment
+
+
+def compta_store_document(db, file_bytes, file_name, mime_type, doc_type, label=""):
+    """Stocke un document global (ex. FEC) directement dans comptabilite.documents."""
+    aid = compta_next_attachment_id(db)
+    if len(file_bytes) > COMPTA_MAX_ATTACHMENT_BYTES:
+        raise ValueError("Document trop volumineux.")
+    attachment = {
+        "id": aid,
+        "file_name": str(file_name),
+        "mime_type": str(mime_type or "application/octet-stream"),
+        "size": len(file_bytes),
+        "encoding": "base64",
+        "data_base64": base64.b64encode(file_bytes).decode("ascii"),
+        "record_kind": doc_type,
+        "record_number": "",
+        "label": label,
+        "created_at": now_iso(),
+    }
+    compta_data(db).setdefault("documents", []).append(attachment)
+    return attachment
+
+
+def _compta_iter_attachments(db):
+    c = compta_data(db)
+    for kind, key in _compta_record_collections().items():
+        for record in c.get(key, []):
+            for att in _compta_attachment_list(record):
+                if att.get("id"):
+                    yield att
+    for att in c.get("documents", []):
+        if att.get("id"):
+            yield att
+
+
+def compta_find_attachment(db, attachment_id):
+    return next((a for a in _compta_iter_attachments(db) if str(a.get("id")) == str(attachment_id)), None)
+
 
 def compta_invoice_attachment(db, invoice_number):
     c = compta_data(db)
     invoice = next((x for x in c["invoices"] if x.get("number") == invoice_number), None)
-    return None if invoice is None else invoice.get("attachment")
+    return None if invoice is None else _compta_attachment_list(invoice)
 
-# ============================================================
-# 📎 STOCKAGE RÉEL DES PIÈCES JOINTES DANS data.json
-# PDF/JPG/JPEG/PNG -> Base64
-# ============================================================
-import base64
 
-def compta_attachment_to_json(file_bytes, file_name, mime_type=""):
-    """Encode the actual document bytes so they can be persisted in JSON."""
-    ext = Path(str(file_name)).suffix.lower()
-    if ext not in COMPTA_ALLOWED_ATTACHMENTS:
-        raise ValueError("Format non pris en charge. Utilise PDF, JPG, JPEG ou PNG.")
-    return {
-        "file_name": str(file_name),
-        "mime_type": str(mime_type or ""),
-        "encoding": "base64",
-        "data_base64": base64.b64encode(file_bytes).decode("ascii"),
-    }
+async def compta_send_attachment(message, db, attachment_id):
+    attachment = compta_find_attachment(db, attachment_id)
+    if not attachment:
+        await message.reply_text("❌ Pièce jointe introuvable.")
+        return False
+    data = compta_attachment_from_json(attachment)
+    if data is None:
+        await message.reply_text("❌ Impossible de reconstruire ce fichier depuis data.json.")
+        return False
+    filename = attachment.get("file_name", "piece_jointe")
+    mime = attachment.get("mime_type", "")
+    # Telegram accepte les PDF comme documents et les images peuvent aussi être
+    # envoyées comme document afin de préserver le fichier original à télécharger.
+    await message.reply_document(
+        document=io.BytesIO(data),
+        filename=filename,
+        caption=f"📎 {filename}\n🆔 {attachment.get('id')}"
+    )
+    return True
 
-def compta_attachment_from_json(attachment):
-    """Restore the original document bytes from its JSON Base64 representation."""
-    if not attachment or attachment.get("encoding") != "base64":
-        return None
-    return base64.b64decode(attachment["data_base64"])
 
-def compta_attach_invoice_bytes(db, invoice_number, file_bytes, file_name, mime_type=""):
-    """Store the complete PDF/image inside the persistent JSON structure."""
+async def compta_show_all_attachments(q, db):
+    items = list(_compta_iter_attachments(db))
+    if not items:
+        await q.edit_message_text(
+            "📎 <b>PIÈCES JOINTES</b>\n\nAucun PDF, JPG, JPEG ou PNG enregistré.",
+            reply_markup=compta_menu_keyboard(), parse_mode="HTML"
+        )
+        return
+    buttons = []
+    lines = ["📎 <b>PIÈCES JOINTES ENREGISTRÉES</b>", "━━━━━━━━━━━━━━━━━━━━"]
+    for att in items[-30:]:
+        size_mb = float(att.get("size", 0)) / (1024 * 1024)
+        label = att.get("label") or att.get("record_number") or att.get("record_kind") or "Document"
+        lines.append(f"\n📄 <b>{esc(att.get('file_name'))}</b>\n{esc(label)} • {size_mb:.2f} Mo • <code>{esc(att.get('id'))}</code>")
+        buttons.append([InlineKeyboardButton(
+            f"⬇️ Récupérer {str(att.get('file_name',''))[:35]}",
+            callback_data=f"compta:download_attachment:{att.get('id')}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")])
+    await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+
+async def compta_choose_attachment_target(q, context, db, kind):
     c = compta_data(db)
-    invoice = next((x for x in c["invoices"] if x.get("number") == invoice_number), None)
-    if invoice is None:
-        raise ValueError("Facture introuvable.")
-    attachment = compta_attachment_to_json(file_bytes, file_name, mime_type)
-    invoice["attachment"] = attachment
-    return attachment
+    key = _compta_record_collections().get(kind)
+    if not key:
+        await q.answer("Section non prise en charge.", show_alert=True)
+        return
+    records = c.get(key, [])
+    if not records:
+        await q.edit_message_text(
+            f"📎 Aucun élément dans cette section pour le moment.",
+            reply_markup=compta_section_keyboard(kind), parse_mode="HTML"
+        )
+        return
+    buttons = []
+    for rec in records[-30:]:
+        ident = rec.get("number") or rec.get("id") or rec.get("date") or "élément"
+        label = rec.get("customer") or rec.get("label") or rec.get("method") or rec.get("date") or ""
+        target = f"{kind}|{ident}"
+        buttons.append([InlineKeyboardButton(
+            f"📎 {str(ident)[:25]} — {str(label)[:22]}",
+            callback_data=f"compta:attach_to:{target}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{kind}")])
+    await q.edit_message_text(
+        f"📎 <b>CHOISIR L'ÉLÉMENT</b>\n\nSection : <b>{esc(kind)}</b>\n\nChoisis l'élément auquel tu veux joindre le PDF/photo.",
+        reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML"
+    )
 
+
+async def compta_receive_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_access(update):
+        return True
+    target = context.user_data.get("compta_attachment_target")
+    if not target:
+        return False
+
+    message = update.effective_message
+    file_name = ""
+    mime_type = ""
+    file_obj = None
+    try:
+        if message.document:
+            file_name = message.document.file_name or "document.pdf"
+            mime_type = message.document.mime_type or ""
+            file_obj = message.document
+        elif message.photo:
+            file_name = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            mime_type = "image/jpeg"
+            file_obj = message.photo[-1]
+        else:
+            return False
+
+        ext = Path(file_name).suffix.lower()
+        if ext not in COMPTA_ALLOWED_ATTACHMENTS:
+            await message.reply_text("❌ Format refusé. Envoie uniquement PDF, JPG, JPEG ou PNG.")
+            return True
+
+        tg_file = await file_obj.get_file()
+        data = bytes(await tg_file.download_as_bytearray())
+        if len(data) > COMPTA_MAX_ATTACHMENT_BYTES:
+            await message.reply_text("❌ Fichier trop volumineux. Limite : 15 Mo.")
+            return True
+
+        kind, ident = target.split("|", 1)
+        key = _compta_record_collections().get(kind)
+        records = compta_data(DB).get(key, []) if key else []
+        record = next((r for r in records if str(r.get("number") or r.get("id") or r.get("date") or "") == ident), None)
+        if not record:
+            await message.reply_text("❌ Élément comptable introuvable. Recommence depuis le menu Pièces jointes.")
+            context.user_data.pop("compta_attachment_target", None)
+            return True
+
+        attachment = compta_store_attachment(DB, kind, record, data, file_name, mime_type)
+        save_db(DB)
+        context.user_data.pop("compta_attachment_target", None)
+        await message.reply_text(
+            "✅ <b>Pièce jointe enregistrée</b>\n\n"
+            f"📄 {esc(file_name)}\n"
+            f"📦 Taille : {len(data)/(1024*1024):.2f} Mo\n"
+            f"🆔 <code>{esc(attachment['id'])}</code>\n\n"
+            "💾 Le fichier complet est enregistré dans <code>data.json</code>.\n"
+            "Tu pourras le récupérer depuis 📎 Pièces jointes.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=compta_menu_keyboard(),
+        )
+        return True
+    except Exception as exc:
+        log.exception("Erreur pièce jointe")
+        await message.reply_text(f"❌ Impossible d'enregistrer le fichier : {esc(exc)}")
+        return True
+
+
+# ============================================================
+# DÉMARRAGE — toujours après la définition complète du module
+# ============================================================
 if __name__ == "__main__":
     main()
