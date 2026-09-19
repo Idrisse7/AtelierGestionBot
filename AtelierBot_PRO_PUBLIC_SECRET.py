@@ -222,6 +222,7 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device")],
         [InlineKeyboardButton("👥 Collaborateurs", callback_data="v2menu:collaborateurs"),
          InlineKeyboardButton("📝 Activité", callback_data="activity")],
+        [InlineKeyboardButton("📋 Inventaire", callback_data="v2act:stock:inventory")],
         [InlineKeyboardButton("🔄 Actualiser", callback_data="home")],
     ])
 
@@ -1355,7 +1356,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 V2_SECTIONS = {
- "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete"), ("📋 Inventaire", "v2act:stock:inventory")]),
+ "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete")]),
  "ruptures": ("🚨 RUPTURES", [("➕ Ajouter", "v2act:ruptures:add"), ("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search")]),
  "commandes": ("📋 COMMANDES", [("➕ Ajouter", "v2act:commandes:add"), ("📋 Voir", "v2act:commandes:list"), ("🔎 Rechercher", "v2act:commandes:search"), ("✏️ Modifier", "v2act:commandes:edit"), ("🗑️ Supprimer", "v2act:commandes:delete")]),
  "livraisons": ("🚚 LIVRAISONS", [("➕ Ajouter", "v2act:livraisons:add"), ("📋 Voir", "v2act:livraisons:list"), ("🔎 Rechercher", "v2act:livraisons:search"), ("✏️ Modifier", "v2act:livraisons:edit"), ("🗑️ Supprimer", "v2act:livraisons:delete")]),
