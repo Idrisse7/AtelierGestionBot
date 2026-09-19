@@ -2434,6 +2434,7 @@ async def compta_handle_callback(update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬇️ Récupérer les fichiers enregistrés", callback_data="compta:attachments")],
                 [InlineKeyboardButton("⬅️ Retour comptabilité", callback_data="compta:menu")]
+                [InlineKeyboardButton("📷 Scanner", callback_data="scan_device")],
             ]),
             parse_mode="HTML")
     elif action == "attachments":
