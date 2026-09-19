@@ -1177,28 +1177,46 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ref = str(payload.get("reference", "")).strip()
-    value = str(payload.get("value", "")).strip().replace(" ", "")
+    value = str(payload.get("value", "")).strip()
     kind_hint = str(payload.get("type", "")).upper()
 
+    # Mode formulaire : le scan remplit LE CHAMP COURANT du formulaire.
+    # IMPORTANT : un numéro de suivi peut contenir des tirets, slashs, points
+    # ou d'autres séparateurs et ne doit donc pas être rejeté par la validation
+    # générique "barcode" avant d'arriver au traitement du champ.
+    flow = context.user_data.get("v2_flow")
+    flow_field = str(payload.get("field", "")).strip()
+    flow_section = str(payload.get("section", "")).strip()
+
     # Détermine le type du code.
+    # Pour un formulaire, le champ courant est prioritaire : un QR/code-barres
+    # peut contenir un IMEI, un numéro de commande, un suivi, une référence,
+    # une étiquette, un modèle, etc. On ne doit donc PAS appliquer la validation
+    # générique du scanner avant le traitement du champ.
     is_imei = value.isdigit() and len(value) == 15
+    flow_scan_field = bool(
+        flow
+        and flow_field
+        and flow_field in FLOW_SCAN_FIELDS.get(flow, set())
+    )
     if is_imei:
         if not valid_imei(value):
             await msg.reply_text("❌ IMEI invalide (contrôle Luhn échoué).")
             return
         kind = "IMEI"
+    elif flow_scan_field:
+        # Validation minimale ici ; la validation spécifique au champ est faite
+        # juste après (notamment IMEI et type de déblocage).
+        kind = "QR" if kind_hint == "QR" else "CODE_BARRES"
     elif valid_barcode(value) or kind_hint in {"QR", "BARCODE", "CODE_BARRES"}:
         kind = "QR" if kind_hint == "QR" else "CODE_BARRES"
     else:
         await msg.reply_text("❌ Code non reconnu.")
         return
 
-    # Mode formulaire : le scan remplit LE CHAMP COURANT du formulaire,
+    # Le scan remplit LE CHAMP COURANT du formulaire,
     # sans demander de référence stock. Le bot passe ensuite automatiquement
     # à l'étape suivante et réaffiche le bouton Scanner si nécessaire.
-    flow = context.user_data.get("v2_flow")
-    flow_field = str(payload.get("field", "")).strip()
-    flow_section = str(payload.get("section", "")).strip()
     if flow:
         steps = context.user_data.get("v2_steps", [])
         step = context.user_data.get("v2_step", 1)
@@ -1234,6 +1252,13 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("❌ Le scan doit contenir FRP / Google ou iCloud / Apple.")
                 return
         elif not value or len(value) > 120:
+            await msg.reply_text("❌ Valeur scannée invalide.")
+            return
+
+        # Tous les champs déclarés dans FLOW_SCAN_FIELDS passent par cette
+        # validation minimale. Cela évite qu'une catégorie fonctionne et qu'une
+        # autre soit bloquée uniquement à cause du format du code retourné.
+        if flow_scan_field and (not value or len(value) > 120):
             await msg.reply_text("❌ Valeur scannée invalide.")
             return
 
