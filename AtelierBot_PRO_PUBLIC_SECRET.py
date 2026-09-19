@@ -775,8 +775,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["scan_mode"] = True
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-            [InlineKeyboardButton("⬅️ Retour", callback_data="home")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="home")            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+],
         ])
         await q.edit_message_text(
             "📷 <b>SCANNER UN APPAREIL</b>\n\n"
@@ -1605,8 +1605,8 @@ async def v2_handler(update, context):
         context.user_data["scan_mode"] = True
         context.user_data["scan_context"] = sec
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-            [InlineKeyboardButton("⬅️ Retour", callback_data=f"v2menu:{sec}")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data=f"v2menu:{sec}")            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+],
         ])
         await q.edit_message_text(
             f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\\n\\n"
@@ -2473,7 +2473,6 @@ async def compta_handle_callback(update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬇️ Récupérer les fichiers enregistrés", callback_data="compta:attachments")],
                 [InlineKeyboardButton("⬅️ Retour comptabilité", callback_data="compta:menu")]
-                [InlineKeyboardButton("📷 Scanner", callback_data="scan_device")],
             ]),
             parse_mode="HTML")
     elif action == "attachments":
@@ -2491,7 +2490,8 @@ async def compta_handle_callback(update, context):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📎 Pièces jointes enregistrées", callback_data="compta:attachments")],
-                [InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{ {'invoice':'invoices','credit':'credits','payment':'payments','expense':'expenses','bank':'bank'}.get(kind,'menu')}")]
+                [InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{ {'invoice':'invoices','credit':'credits','payment':'payments','expense':'expenses','bank':'bank'}.get(kind,'menu')                [InlineKeyboardButton("📷 Scanner", callback_data="scan_device")],
+}")]
             ])
         )
     elif action.startswith("download_attachment:"):
