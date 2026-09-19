@@ -223,6 +223,7 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Collaborateurs", callback_data="v2menu:collaborateurs"),
          InlineKeyboardButton("📝 Activité", callback_data="activity")],
         [InlineKeyboardButton("📋 Inventaire", callback_data="v2act:stock:inventory")],
+        [InlineKeyboardButton("💰 Comptabilité", callback_data="compta:menu")],
         [InlineKeyboardButton("🔄 Actualiser", callback_data="home")],
     ])
 
@@ -2114,5 +2115,322 @@ def main():
     app.run_polling(drop_pending_updates=True)
 
 
+# ====== COMPTABILITE (module complementaire) ======
+COMPTA_DEFAULT={"next_invoice":1,"next_credit_note":1,"invoices":[],"credit_notes":[],
+"payments":[],"expenses":[],"bank_lines":[],"vat_rate":20.0,"journal":[]}
+
+def compta_data(db):
+    c=db.setdefault("comptabilite",{})
+    for k,v in COMPTA_DEFAULT.items():
+        if k not in c: c[k]=[] if isinstance(v,list) else v
+    return c
+
+def compta_next_number(c,kind="invoice"):
+    key="next_invoice" if kind=="invoice" else "next_credit_note"
+    prefix="FA" if kind=="invoice" else "AV"
+    n=int(c.get(key,1)); c[key]=n+1
+    return f"{prefix}-{n:06d}"
+
+def compta_add_invoice(db,customer,amount_ht,vat_rate=None,description=""):
+    c=compta_data(db); rate=float(c["vat_rate"] if vat_rate is None else vat_rate)
+    ht=round(float(amount_ht),2); vat=round(ht*rate/100,2); ttc=round(ht+vat,2)
+    num=compta_next_number(c)
+    row={"number":num,"customer":str(customer),"description":str(description),
+    "date":__import__("datetime").date.today().isoformat(),"amount_ht":ht,
+    "vat_rate":rate,"vat":vat,"amount_ttc":ttc,"status":"emise"}
+    c["invoices"].append(row); c["journal"].append({"date":row["date"],"type":"FACTURE",
+    "number":num,"label":description or customer,"debit":ttc,"credit":0.0}); return row
+
+def compta_add_credit_note(db,customer,amount_ht,vat_rate=None,description=""):
+    c=compta_data(db); rate=float(c["vat_rate"] if vat_rate is None else vat_rate)
+    ht=round(float(amount_ht),2); vat=round(ht*rate/100,2); ttc=round(ht+vat,2)
+    num=compta_next_number(c,"credit_note")
+    row={"number":num,"customer":str(customer),"description":str(description),
+    "date":__import__("datetime").date.today().isoformat(),"amount_ht":ht,
+    "vat_rate":rate,"vat":vat,"amount_ttc":ttc,"status":"emise"}
+    c["credit_notes"].append(row); c["journal"].append({"date":row["date"],"type":"AVOIR",
+    "number":num,"label":description or customer,"debit":0.0,"credit":ttc}); return row
+
+def compta_add_payment(db,amount,method="CB",reference="",invoice_number=""):
+    c=compta_data(db)
+    row={"date":__import__("datetime").date.today().isoformat(),"amount":round(float(amount),2),
+    "method":str(method),"reference":str(reference),"invoice_number":str(invoice_number)}
+    c["payments"].append(row); return row
+
+def compta_add_expense(db,label,amount_ht,vat_rate=None,category=""):
+    c=compta_data(db); rate=float(c["vat_rate"] if vat_rate is None else vat_rate)
+    ht=round(float(amount_ht),2); vat=round(ht*rate/100,2); ttc=round(ht+vat,2)
+    row={"date":__import__("datetime").date.today().isoformat(),"label":str(label),
+    "category":str(category),"amount_ht":ht,"vat_rate":rate,"vat":vat,"amount_ttc":ttc}
+    c["expenses"].append(row); c["journal"].append({"date":row["date"],"type":"DEPENSE",
+    "number":"","label":label,"debit":0.0,"credit":ttc}); return row
+
+def compta_add_bank_line(db,date,label,amount,reference="",matched=False):
+    c=compta_data(db)
+    row={"date":str(date),"label":str(label),"amount":round(float(amount),2),
+    "reference":str(reference),"matched":bool(matched)}
+    c["bank_lines"].append(row); return row
+
+def compta_reconcile(db):
+    c=compta_data(db); unmatched=[]
+    for line in c["bank_lines"]:
+        if line.get("matched"): continue
+        ok=any(round(float(p.get("amount",0)),2)==round(float(line.get("amount",0)),2)
+        and (not line.get("reference") or line.get("reference") in str(p.get("reference","")))
+        for p in c["payments"])
+        if ok: line["matched"]=True
+        else: unmatched.append(line)
+    return unmatched
+
+def compta_vat_summary(db):
+    c=compta_data(db)
+    collected=round(sum(float(x.get("vat",0)) for x in c["invoices"]),2)
+    deductible=round(sum(float(x.get("vat",0)) for x in c["expenses"]),2)
+    credit=round(sum(float(x.get("vat",0)) for x in c["credit_notes"]),2)
+    return {"collected":collected,"deductible":deductible,"credit_vat":credit,
+    "net_due":round(collected-credit-deductible,2)}
+
+def compta_export_fec(db):
+    c=compta_data(db)
+    fields=["JournalCode","JournalLib","EcritureNum","EcritureDate","CompteNum",
+    "CompteLib","CompAuxNum","CompAuxLib","PieceRef","PieceDate","EcritureLib",
+    "Debit","Credit","EcritureLet","DateLet","ValidDate","Montantdevise","Idevise"]
+    rows=["\t".join(fields)]
+    for i,e in enumerate(c["journal"],1):
+        d=str(e.get("date","")).replace("-","")
+        debit=f'{float(e.get("debit",0)):.2f}'.replace(".",",")
+        credit=f'{float(e.get("credit",0)):.2f}'.replace(".",",")
+        rows.append("\t".join(["AC","Comptabilite",str(i),d,"000000","Compte atelier",
+        "","","",d,str(e.get("label","")),debit,credit,"","",d,"",""]))
+    return "\n".join(rows)
+
 if __name__ == "__main__":
     main()
+
+# ============================================================
+# 💰 INTERFACE TELEGRAM — COMPTABILITÉ
+# ============================================================
+COMPTA_UI_ACTIONS = {
+    "invoice": "🧾 Facture",
+    "credit": "↩️ Avoir",
+    "payment": "💳 Encaissement",
+    "expense": "💸 Dépense",
+    "bank": "🏦 Banque",
+    "vat": "🧮 TVA",
+    "journal": "📚 Journal",
+    "fec": "📤 Export FEC",
+}
+
+def compta_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🧾 Factures", callback_data="compta:invoices"),
+         InlineKeyboardButton("↩️ Avoirs", callback_data="compta:credits")],
+        [InlineKeyboardButton("💳 Encaissements", callback_data="compta:payments"),
+         InlineKeyboardButton("💸 Dépenses", callback_data="compta:expenses")],
+        [InlineKeyboardButton("🏦 Banque", callback_data="compta:bank"),
+         InlineKeyboardButton("🧮 TVA", callback_data="compta:vat")],
+        [InlineKeyboardButton("📚 Journal", callback_data="compta:journal"),
+         InlineKeyboardButton("📤 Export FEC", callback_data="compta:fec")],
+        [InlineKeyboardButton("⬅️ Retour", callback_data="home")],
+    ])
+
+def compta_section_keyboard(section):
+    if section == "invoices":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Nouvelle facture", callback_data="compta:add_invoice")],
+            [InlineKeyboardButton("📎 Joindre PDF/JPG", callback_data="compta:attach_invoice")],
+            [InlineKeyboardButton("📋 Voir les factures", callback_data="compta:list_invoices")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
+        ])
+    if section == "credits":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Nouvel avoir", callback_data="compta:add_credit")],
+            [InlineKeyboardButton("📋 Voir les avoirs", callback_data="compta:list_credits")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
+        ])
+    if section == "payments":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Ajouter encaissement", callback_data="compta:add_payment")],
+            [InlineKeyboardButton("📋 Voir les encaissements", callback_data="compta:list_payments")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
+        ])
+    if section == "expenses":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Ajouter dépense", callback_data="compta:add_expense")],
+            [InlineKeyboardButton("📋 Voir les dépenses", callback_data="compta:list_expenses")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
+        ])
+    if section == "bank":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Ajouter ligne bancaire", callback_data="compta:add_bank")],
+            [InlineKeyboardButton("🔄 Rapprocher", callback_data="compta:reconcile")],
+            [InlineKeyboardButton("📋 Voir la banque", callback_data="compta:list_bank")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
+        ])
+    return compta_menu_keyboard()
+
+def compta_format_money(v):
+    return f"{float(v):,.2f} €".replace(",", " ").replace(".", ",")
+
+def compta_summary_text(db):
+    c = compta_data(db)
+    vat = compta_vat_summary(db)
+    total_invoices = sum(float(x.get("amount_ttc", 0)) for x in c["invoices"])
+    total_expenses = sum(float(x.get("amount_ttc", 0)) for x in c["expenses"])
+    payments = sum(float(x.get("amount", 0)) for x in c["payments"])
+    return (
+        "💰 <b>COMPTABILITÉ</b>\n\n"
+        f"🧾 Factures : {len(c['invoices'])} — {compta_format_money(total_invoices)}\n"
+        f"↩️ Avoirs : {len(c['credit_notes'])}\n"
+        f"💳 Encaissements : {compta_format_money(payments)}\n"
+        f"💸 Dépenses : {len(c['expenses'])} — {compta_format_money(total_expenses)}\n"
+        f"🧮 TVA nette calculée : {compta_format_money(vat['net_due'])}\n"
+        f"📚 Écritures : {len(c['journal'])}\n"
+        f"🏦 Lignes bancaires : {len(c['bank_lines'])}"
+    )
+
+def compta_list_text(db, kind):
+    c = compta_data(db)
+    mapping = {
+        "invoices": ("🧾 FACTURES", c["invoices"], lambda x:
+            f"{x['number']} • {x['customer']} • {compta_format_money(x['amount_ttc'])}"),
+        "credits": ("↩️ AVOIRS", c["credit_notes"], lambda x:
+            f"{x['number']} • {x['customer']} • {compta_format_money(x['amount_ttc'])}"),
+        "payments": ("💳 ENCAISSEMENTS", c["payments"], lambda x:
+            f"{x['date']} • {x['method']} • {compta_format_money(x['amount'])}"),
+        "expenses": ("💸 DÉPENSES", c["expenses"], lambda x:
+            f"{x['date']} • {x['label']} • {compta_format_money(x['amount_ttc'])}"),
+        "bank": ("🏦 BANQUE", c["bank_lines"], lambda x:
+            f"{x['date']} • {x['label']} • {compta_format_money(x['amount'])} • {'✅' if x.get('matched') else '⏳'}"),
+    }
+    title, items, formatter = mapping[kind]
+    if not items:
+        return f"{title}\n\nAucun élément."
+    return title + "\n\n" + "\n".join(formatter(x) for x in items[-30:])
+
+async def compta_handle_callback(update, context):
+    q = update.callback_query
+    if not q or not q.data.startswith("compta:"):
+        return False
+    await q.answer()
+    db = context.application.bot_data.get("db")
+    if db is None:
+        db = context.application.bot_data.setdefault("db", {})
+    action = q.data.split(":", 1)[1]
+
+    if action == "menu":
+        await q.edit_message_text(compta_summary_text(db), reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+    elif action in {"invoices","credits","payments","expenses","bank"}:
+        await q.edit_message_text(
+            compta_list_text(db, action) if action.startswith("list_") is False else "",
+            reply_markup=compta_section_keyboard(action), parse_mode="HTML"
+        )
+    elif action.startswith("list_"):
+        kind = action[5:]
+        await q.edit_message_text(compta_list_text(db, kind), reply_markup=compta_section_keyboard(kind), parse_mode="HTML")
+    elif action == "vat":
+        v = compta_vat_summary(db)
+        await q.edit_message_text(
+            "🧮 <b>TVA</b>\n\n"
+            f"TVA collectée : {compta_format_money(v['collected'])}\n"
+            f"TVA sur avoirs : {compta_format_money(v['credit_vat'])}\n"
+            f"TVA déductible : {compta_format_money(v['deductible'])}\n"
+            f"TVA nette calculée : {compta_format_money(v['net_due'])}\n\n"
+            "⚠️ Calcul indicatif : le régime fiscal réel doit être vérifié avant déclaration.",
+            reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+    elif action == "journal":
+        c = compta_data(db)
+        body = "📚 <b>JOURNAL</b>\n\n" + (
+            "\n".join(f"{e.get('date','')} • {e.get('type','')} • {e.get('label','')} • "
+                      f"D {compta_format_money(e.get('debit',0))} / C {compta_format_money(e.get('credit',0))}"
+                      for e in c["journal"][-30:])
+            if c["journal"] else "Aucune écriture."
+        )
+        await q.edit_message_text(body, reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+    elif action == "fec":
+        # The existing project can later plug this text into its existing document/file sender.
+        fec = compta_export_fec(db)
+        context.user_data["compta_fec_pending"] = fec
+        await q.edit_message_text(
+            "📤 <b>EXPORT FEC</b>\n\n"
+            "L'export a été généré en mémoire. Il contient les colonnes FEC-style du module comptable.\n"
+            "Utilise l'action d'envoi de fichier existante du bot pour transmettre le contenu.\n\n"
+            "⚠️ À faire valider par l'expert-comptable avant utilisation comme FEC légal.",
+            reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+    elif action in {"add_invoice","add_credit","add_payment","add_expense","add_bank"}:
+        context.user_data["compta_pending"] = action
+        await q.edit_message_text(
+            f"✏️ Saisie : <b>{COMPTA_UI_ACTIONS.get(action.replace('add_',''), action)}</b>\n\n"
+            "Pour éviter d'interférer avec tes autres formulaires, cette action est préparée ici "
+            "et peut être branchée sur le système de conversation existant.",
+            reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+    elif action == "reconcile":
+        unmatched = compta_reconcile(db)
+        await q.edit_message_text(
+            f"🏦 <b>RAPPROCHEMENT</b>\n\n"
+            f"Non rapprochées : {len(unmatched)}",
+            reply_markup=compta_section_keyboard("bank"), parse_mode="HTML")
+    return True
+
+# ============================================================
+# 📎 PIÈCES JOINTES FACTURES — PDF / JPG / JPEG / PNG
+# ============================================================
+COMPTA_ALLOWED_ATTACHMENTS = {".pdf", ".jpg", ".jpeg", ".png"}
+
+def compta_attach_invoice_file(db, invoice_number, file_id, file_name, file_size=None, mime_type=""):
+    """Store Telegram file metadata linked to an invoice.
+    The Telegram file_id is reusable for later download/send operations."""
+    c = compta_data(db)
+    invoice = next((x for x in c["invoices"] if x.get("number") == invoice_number), None)
+    if invoice is None:
+        raise ValueError("Facture introuvable.")
+    ext = Path(str(file_name)).suffix.lower()
+    if ext not in COMPTA_ALLOWED_ATTACHMENTS:
+        raise ValueError("Format non pris en charge. Utilise PDF, JPG, JPEG ou PNG.")
+    attachment = {
+        "file_id": str(file_id),
+        "file_name": str(file_name),
+        "file_size": int(file_size or 0),
+        "mime_type": str(mime_type or ""),
+    }
+    invoice["attachment"] = attachment
+    return attachment
+
+def compta_invoice_attachment(db, invoice_number):
+    c = compta_data(db)
+    invoice = next((x for x in c["invoices"] if x.get("number") == invoice_number), None)
+    return None if invoice is None else invoice.get("attachment")
+
+# ============================================================
+# 📎 STOCKAGE RÉEL DES PIÈCES JOINTES DANS data.json
+# PDF/JPG/JPEG/PNG -> Base64
+# ============================================================
+import base64
+
+def compta_attachment_to_json(file_bytes, file_name, mime_type=""):
+    """Encode the actual document bytes so they can be persisted in JSON."""
+    ext = Path(str(file_name)).suffix.lower()
+    if ext not in COMPTA_ALLOWED_ATTACHMENTS:
+        raise ValueError("Format non pris en charge. Utilise PDF, JPG, JPEG ou PNG.")
+    return {
+        "file_name": str(file_name),
+        "mime_type": str(mime_type or ""),
+        "encoding": "base64",
+        "data_base64": base64.b64encode(file_bytes).decode("ascii"),
+    }
+
+def compta_attachment_from_json(attachment):
+    """Restore the original document bytes from its JSON Base64 representation."""
+    if not attachment or attachment.get("encoding") != "base64":
+        return None
+    return base64.b64decode(attachment["data_base64"])
+
+def compta_attach_invoice_bytes(db, invoice_number, file_bytes, file_name, mime_type=""):
+    """Store the complete PDF/image inside the persistent JSON structure."""
+    c = compta_data(db)
+    invoice = next((x for x in c["invoices"] if x.get("number") == invoice_number), None)
+    if invoice is None:
+        raise ValueError("Facture introuvable.")
+    attachment = compta_attachment_to_json(file_bytes, file_name, mime_type)
+    invoice["attachment"] = attachment
+    return attachment
