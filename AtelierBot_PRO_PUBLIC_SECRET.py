@@ -282,20 +282,13 @@ def dashboard_metrics() -> dict[str, Any]:
     frp_month = [x for x in unlock_month if "FRP" in str(x.get("type", "")).upper() or "GOOGLE" in str(x.get("type", "")).upper()]
     icloud_month = [x for x in unlock_month if "ICLOUD" in str(x.get("type", "")).upper() or "APPLE" in str(x.get("type", "")).upper()]
 
-    # CA : on comptabilise les prestations enregistrées dès qu'elles ont
-    # un montant, sauf celles explicitement annulées.
-    # - réparations : le devis/prix saisi est pris en compte immédiatement ;
-    # - déblocages : le prix saisi est pris en compte immédiatement ;
-    # - commandes, livraisons et stock ne sont pas du CA : ce sont des
-    #   achats/logistique ou de la valeur de stock.
-    revenue_repairs = [
-        x for x in repairs
-        if str(x.get("statut", "")).strip().upper() not in {"ANNULEE", "ANNULÉE", "ANNULE", "ANNULÉ"}
-    ]
-    revenue_unlocks = [
-        x for x in unlocks
-        if str(x.get("statut", "")).strip().upper() not in {"ANNULEE", "ANNULÉE", "ANNULE", "ANNULÉ"}
-    ]
+    # CA :
+    # - réparations : uniquement les dossiers terminés/payés ;
+    # - déblocages : chaque déblocage enregistré est comptabilisé,
+    #   même s'il est encore "EN ATTENTE", car le prix est saisi lors
+    #   de la création du dossier.
+    revenue_repairs = [x for x in repairs if _is_finished(x.get("statut"))]
+    revenue_unlocks = unlocks
     revenue_day = (
         sum(_amount(x) for x in revenue_repairs if same_day(x, now))
         + sum(_amount(x) for x in revenue_unlocks if same_day(x, now))
@@ -1362,8 +1355,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 V2_SECTIONS = {
- "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete")]),
- "ruptures": ("🚨 RUPTURES", [("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search")]),
+ "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete"), ("📋 Inventaire", "v2act:stock:inventory")]),
+ "ruptures": ("🚨 RUPTURES", [("➕ Ajouter", "v2act:ruptures:add"), ("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search")]),
  "commandes": ("📋 COMMANDES", [("➕ Ajouter", "v2act:commandes:add"), ("📋 Voir", "v2act:commandes:list"), ("🔎 Rechercher", "v2act:commandes:search"), ("✏️ Modifier", "v2act:commandes:edit"), ("🗑️ Supprimer", "v2act:commandes:delete")]),
  "livraisons": ("🚚 LIVRAISONS", [("➕ Ajouter", "v2act:livraisons:add"), ("📋 Voir", "v2act:livraisons:list"), ("🔎 Rechercher", "v2act:livraisons:search"), ("✏️ Modifier", "v2act:livraisons:edit"), ("🗑️ Supprimer", "v2act:livraisons:delete")]),
  "reparations": ("🔧 RÉPARATIONS", [("➕ Ajouter une réparation", "v2act:reparations:add"), ("📋 Voir", "v2act:reparations:list"), ("🔎 Rechercher", "v2act:reparations:search"), ("✏️ Modifier", "v2act:reparations:edit"), ("🗑️ Supprimer", "v2act:reparations:delete"), ("⏸️ Pause", "v2act:reparations:pause"), ("▶️ Reprendre", "v2act:reparations:resume"), ("📦 Attente pièce", "v2act:reparations:parts"), ("👤 Attente client", "v2act:reparations:customer"), ("🧪 À tester", "v2act:reparations:test"), ("✅ Terminer", "v2act:reparations:done"), ("📦 Livrée", "v2act:reparations:delivered"), ("❌ Annuler", "v2act:reparations:cancel")]),
@@ -1477,6 +1470,36 @@ async def v2_handler(update, context):
         _start_flow(context, "stock_add_v2", [("produit", "1/7 — Nom du produit/modèle ?"), ("reference", "2/7 — Référence interne ?"), ("quantite", "3/7 — Quantité ?"), ("prix_achat", "4/7 — Prix d'achat unitaire ?"), ("seuil", "5/7 — Seuil d'alerte ?"), ("emplacement", "6/7 — Emplacement ?"), ("fournisseur", "7/7 — Fournisseur ?")])
         await q.edit_message_text("➕ <b>AJOUT STOCK</b>\n\n1/7 — Nom du produit/modèle ?", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
 
+    if sec == "stock" and act == "inventory":
+        items = DB.get("stock", [])
+        if not items:
+            await q.edit_message_text("📋 <b>INVENTAIRE</b>\n\nAucune référence dans le stock.", parse_mode=ParseMode.HTML, reply_markup=back_menu())
+            return
+        context.user_data.clear()
+        context.user_data["inventory_items"] = [str(x.get("reference", "")) for x in items]
+        context.user_data["inventory_index"] = 0
+        context.user_data["inventory_corrections"] = []
+        ref = context.user_data["inventory_items"][0]
+        item = next((x for x in items if str(x.get("reference", "")) == ref), None)
+        theoretical = int(item.get("quantite", 0)) if item else 0
+        await q.edit_message_text(
+            f"📋 <b>INVENTAIRE</b>\n\n1/{len(items)} — <b>{esc(item.get('produit', ref) if item else ref)}</b>\n"
+            f"🔖 Réf. : <code>{esc(ref)}</code>\n"
+            f"📦 Stock théorique : <b>{theoretical}</b>\n\n"
+            "Envoie la quantité réellement comptée.",
+            parse_mode=ParseMode.HTML, reply_markup=back_menu()
+        )
+        return
+
+    if sec == "ruptures" and act == "add":
+        _start_flow(context, "rupture_add", [("reference", "Envoie la référence du produit à mettre en rupture.")])
+        await q.edit_message_text(
+            "➕ <b>AJOUTER UNE RUPTURE</b>\n\n"
+            "Envoie la <b>référence exacte</b> du produit existant.\n"
+            "Le stock sera ramené à <b>0</b> et le mouvement sera enregistré.",
+            parse_mode=ParseMode.HTML, reply_markup=back_menu()
+        ); return
+
     flow_specs = {
         ("commandes", "add"): ("commande_add", [("numero", "1/4 — Numéro de commande ?"), ("fournisseur", "2/4 — Fournisseur ?"), ("montant", "3/4 — Montant ?"), ("statut", "4/4 — Statut ?")], "📋 <b>NOUVELLE COMMANDE</b>\n\n1/4 — Numéro de commande ?"),
         ("livraisons", "add"): ("livraison_add", [("commande", "1/5 — Numéro de commande ?"), ("transporteur", "2/5 — Transporteur ?"), ("suivi", "3/5 — Numéro de suivi ?"), ("date_prevue", "4/5 — Date prévue ?"), ("statut", "5/5 — Statut ?")], "🚚 <b>NOUVELLE LIVRAISON</b>\n\n1/5 — Numéro de commande ?"),
@@ -1552,6 +1575,24 @@ async def _finish_flow(update, context, flow, f):
         try: f["devis"] = _safe_float(f["devis"])
         except ValueError: await update.effective_message.reply_text("❌ Prix/devis invalide.", reply_markup=back_menu()); return True
         DB["reparations"].append({"id":f"REP-{len(DB['reparations'])+1:05d}", "numero":f["numero"], "appareil":f["appareil"], "client":f["client"], "panne":f["panne"], "identifiant":"" if f["imei"]=="-" else f["imei"], "type_identifiant":"IMEI" if f["imei"]!="-" else "", "devis":f["devis"], "statut":f["statut"], "date":now_iso(), "historique":[]})
+    elif flow == "rupture_add":
+        ref = str(f.get("reference", "")).strip()
+        item = next((x for x in DB.get("stock", []) if str(x.get("reference", "")).strip().lower() == ref.lower()), None)
+        if not item:
+            await update.effective_message.reply_text(
+                "❌ Référence introuvable dans le stock. Ajoute d'abord le produit au stock.",
+                reply_markup=back_menu()
+            )
+            return True
+        old = int(item.get("quantite", 0))
+        item["quantite"] = 0
+        item["updated_at"] = now_iso()
+        DB.setdefault("mouvements", []).append({
+            "date": now_iso(), "reference": item.get("reference"),
+            "type": "RUPTURE_FORCEE", "quantite": -old,
+            "avant": old, "apres": 0, "chat_id": cid
+        })
+        log_activity(cid, "RUPTURE_FORCEE", str(item.get("reference")))
     elif flow == "deblocage":
         if f["type"].upper() not in {"FRP", "GOOGLE", "FRP / GOOGLE", "ICLOUD", "I-CLOUD", "ICLOUD / APPLE"}:
             await update.effective_message.reply_text("❌ Réponds FRP ou iCloud.", reply_markup=back_menu()); return True
@@ -1563,7 +1604,7 @@ async def _finish_flow(update, context, flow, f):
     else:
         return False
     save_db(DB); context.user_data.clear()
-    labels={"commande_add":"commande","livraison_add":"livraison","fournisseur_add_v2":"fournisseur","movement_in":"entrée stock","movement_out":"sortie stock","reparation":"réparation","deblocage":"dossier de déblocage"}
+    labels={"commande_add":"commande","livraison_add":"livraison","fournisseur_add_v2":"fournisseur","movement_in":"entrée stock","movement_out":"sortie stock","reparation":"réparation","deblocage":"dossier de déblocage","rupture_add":"mise en rupture"}
     await update.effective_message.reply_text(f"✅ <b>{labels[flow].capitalize()} enregistré(e).</b>", parse_mode=ParseMode.HTML, reply_markup=menu())
     return True
 
@@ -1640,6 +1681,70 @@ async def v2_text_router(update, context):
             if needle in " ".join(str(v) for v in x.values()).lower():
                 old=x.get("statut",""); x["statut"]=st; x.setdefault("historique",[]).append({"date":now_iso(),"action":"statut","ancien":old,"nouveau":st,"user":str(update.effective_chat.id)}); save_db(DB); await update.effective_message.reply_text(f"✅ {esc(old)} → <b>{esc(st)}</b>", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
         await update.effective_message.reply_text("❌ Réparation introuvable.", reply_markup=menu()); return True
+
+    # Mode inventaire : contrôle physique référence par référence.
+    if context.user_data.get("inventory_items") is not None:
+        items_refs = context.user_data.get("inventory_items", [])
+        idx = int(context.user_data.get("inventory_index", 0))
+        if idx >= len(items_refs):
+            return True
+        try:
+            counted = _safe_int(txt)
+            if counted < 0:
+                raise ValueError
+        except ValueError:
+            await update.effective_message.reply_text("❌ Envoie uniquement une quantité entière positive ou 0.", reply_markup=back_menu())
+            return True
+
+        ref = items_refs[idx]
+        item = next((x for x in DB.get("stock", []) if str(x.get("reference", "")) == ref), None)
+        if item is None:
+            await update.effective_message.reply_text("❌ Référence introuvable pendant l'inventaire.", reply_markup=back_menu())
+            context.user_data.clear()
+            return True
+        old = int(item.get("quantite", 0))
+        if old != counted:
+            item["quantite"] = counted
+            item["updated_at"] = now_iso()
+            DB.setdefault("mouvements", []).append({
+                "date": now_iso(), "reference": ref, "type": "INVENTAIRE",
+                "quantite": counted - old, "avant": old, "apres": counted,
+                "chat_id": update.effective_chat.id
+            })
+            context.user_data.setdefault("inventory_corrections", []).append((ref, old, counted))
+            log_activity(update.effective_chat.id, "INVENTAIRE_CORRECTION", f"{ref}: {old} -> {counted}")
+
+        idx += 1
+        context.user_data["inventory_index"] = idx
+        if idx < len(items_refs):
+            next_ref = items_refs[idx]
+            next_item = next((x for x in DB.get("stock", []) if str(x.get("reference", "")) == next_ref), None)
+            theoretical = int(next_item.get("quantite", 0)) if next_item else 0
+            await update.effective_message.reply_text(
+                f"📋 <b>INVENTAIRE</b>\n\n{idx+1}/{len(items_refs)} — <b>{esc(next_item.get('produit', next_ref) if next_item else next_ref)}</b>\n"
+                f"🔖 Réf. : <code>{esc(next_ref)}</code>\n"
+                f"📦 Stock théorique : <b>{theoretical}</b>\n\n"
+                "Envoie la quantité réellement comptée.",
+                parse_mode=ParseMode.HTML, reply_markup=back_menu()
+            )
+            return True
+
+        corrections = context.user_data.get("inventory_corrections", [])
+        save_db(DB)
+        context.user_data.clear()
+        total = sum(int(x.get("quantite", 0)) for x in DB.get("stock", []))
+        low = sum(1 for x in DB.get("stock", []) if 0 < int(x.get("quantite", 0)) <= int(x.get("seuil", DB["settings"]["low_stock_default"])))
+        out = sum(1 for x in DB.get("stock", []) if int(x.get("quantite", 0)) <= 0)
+        await update.effective_message.reply_text(
+            "📋 <b>INVENTAIRE TERMINÉ</b>\n\n"
+            f"📦 Références vérifiées : <b>{len(items_refs)}</b>\n"
+            f"✏️ Corrections : <b>{len(corrections)}</b>\n"
+            f"📦 Stock final : <b>{total}</b> unités\n"
+            f"🟠 Stocks faibles : <b>{low}</b>\n"
+            f"🔴 Ruptures : <b>{out}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=menu()
+        )
+        return True
 
     flow=context.user_data.get("v2_flow")
     if flow:
