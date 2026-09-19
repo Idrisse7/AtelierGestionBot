@@ -1247,17 +1247,10 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         form[flow_field] = value
         context.user_data["v2_step"] = step + 1
 
-        # Nettoyage : le message "📷 Caméra prête" est supprimé après un scan
-        # pour éviter d'empiler les anciennes ouvertures de caméra dans Telegram.
-        camera_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-        if camera_prompt_id:
-            try:
-                await context.bot.delete_message(
-                    chat_id=msg.chat_id,
-                    message_id=int(camera_prompt_id),
-                )
-            except Exception:
-                pass
+        # Nettoyage : toutes les anciennes invites caméra sont supprimées
+        # après un scan, y compris celles éventuellement laissées par une
+        # autre catégorie.
+        await delete_all_camera_prompts(context, msg.chat_id)
 
         # Le clavier ReplyKeyboard qui a servi à ouvrir la caméra est
         # toujours retiré après un scan. Le prochain champ utilise son propre
@@ -1487,6 +1480,7 @@ async def stop_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("scan_mode"):
         await update.effective_message.reply_text("ℹ️ Aucun scan en cours.")
         return
+    await delete_all_camera_prompts(context, update.effective_chat.id)
     context.user_data.clear()
     await update.effective_message.reply_text(
         "🛑 <b>Scan terminé.</b>", parse_mode=ParseMode.HTML, reply_markup=menu()
@@ -1494,6 +1488,7 @@ async def stop_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await delete_all_camera_prompts(context, update.effective_chat.id)
     context.user_data.clear()
     await update.effective_message.reply_text("❌ Opération annulée.", reply_markup=menu())
     return ConversationHandler.END
@@ -1675,6 +1670,35 @@ async def deblocage_type_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+async def delete_all_camera_prompts(context, chat_id):
+    """Supprime toutes les anciennes invites caméra de ce chat.
+
+    Les formulaires et les scanners peuvent créer plusieurs messages caméra
+    au fil des catégories. On conserve leurs IDs dans chat_data (qui survit
+    à context.user_data.clear()) afin que Retour/Annuler puisse tous les
+    supprimer proprement, sans toucher aux messages du formulaire.
+    """
+    ids = context.chat_data.pop("camera_prompt_message_ids", []) or []
+    # Compatibilité avec l'ancien stockage mono-ID.
+    old_id = context.user_data.pop("camera_prompt_message_id", None)
+    if old_id:
+        ids.append(old_id)
+
+    seen = set()
+    for message_id in ids:
+        try:
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            continue
+        if mid in seen:
+            continue
+        seen.add(mid)
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
+
 def context_scanner_keyboard(section: str):
     """Clavier caméra pour les boutons 📷 Scanner des sous-menus.
 
@@ -1726,17 +1750,9 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{SCANNER_WEBAPP_URL}?mode=flow"
         f"&section={section}&field={field}"
     )
-    # Supprime une éventuelle ancienne invite caméra avant d'en créer une
-    # nouvelle : un seul message "Caméra prête" reste visible à la fois.
-    old_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-    if old_prompt_id:
-        try:
-            await context.bot.delete_message(
-                chat_id=q.message.chat_id,
-                message_id=int(old_prompt_id),
-            )
-        except Exception:
-            pass
+    # Nettoie toutes les anciennes invites caméra, même celles laissées par
+    # une autre catégorie ou une ouverture précédente.
+    await delete_all_camera_prompts(context, q.message.chat_id)
 
     # ReplyKeyboard séparé : c'est ce mécanisme qui permet à sendData()
     # de remonter les données au bot sous StatusUpdate.WEB_APP_DATA.
@@ -1752,7 +1768,7 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_persistent=False,
         ),
     )
-    context.user_data["camera_prompt_message_id"] = prompt_msg.message_id
+    context.chat_data.setdefault("camera_prompt_message_ids", []).append(prompt_msg.message_id)
 
 
 async def v2_handler(update, context):
@@ -1901,11 +1917,12 @@ async def v2_handler(update, context):
             "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
             parse_mode=ParseMode.HTML,
         )
-        await q.message.reply_text(
+        prompt_msg = await q.message.reply_text(
             "📷 <b>Scanner prêt</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=context_scanner_keyboard(sec),
         )
+        context.chat_data.setdefault("camera_prompt_message_ids", []).append(prompt_msg.message_id)
         return
 
 
@@ -2376,15 +2393,7 @@ async def v2_text_router(update, context):
     # (ReplyKeyboard), pas des callback queries.
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_context"):
         sec = context.user_data.get("scan_context") or ""
-        camera_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-        if camera_prompt_id:
-            try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=int(camera_prompt_id),
-                )
-            except Exception:
-                pass
+        await delete_all_camera_prompts(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
@@ -2398,15 +2407,7 @@ async def v2_text_router(update, context):
 
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
         sec = context.user_data.get("v2_section") or ""
-        camera_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-        if camera_prompt_id:
-            try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=int(camera_prompt_id),
-                )
-            except Exception:
-                pass
+        await delete_all_camera_prompts(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
