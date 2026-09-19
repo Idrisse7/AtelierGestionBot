@@ -51,7 +51,7 @@ DATA_FILE = Path(__file__).with_name("data.json")
 BACKUP_DIR = Path(__file__).with_name("backups")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SCANNER_WEBAPP_URL = "https://idrisse7.github.io/AtelierGestionBot1/?v=20260920"
+SCANNER_WEBAPP_URL = "https://idrisse7.github.io/AtelierGestionBot1/"
 ATELIER_PASSWORD = os.getenv("ATELIER_PASSWORD", "").strip()
 
 logging.basicConfig(
@@ -777,10 +777,13 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "scan_device":
         context.user_data.clear()
         context.user_data["scan_mode"] = True
-        context.user_data["scan_step"] = "reference"
-
-        # IMPORTANT : sendData() nécessite que la Mini App soit lancée
-        # depuis un KeyboardButton (ReplyKeyboard), pas un bouton inline.
+        keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+             [KeyboardButton("⬅️ Retour")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            is_persistent=False,
+        )
         await q.edit_message_text(
             "📷 <b>SCANNER UN APPAREIL</b>\n\n"
             "Le bouton ci-dessous ouvre la <b>caméra de ton téléphone directement dans Telegram</b>.\n\n"
@@ -789,16 +792,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "3️⃣ Le résultat revient automatiquement dans le bot et ajoute l'appareil au stock.\n\n"
             "⚠️ La page doit être publiée en HTTPS (GitHub Pages convient).",
             parse_mode=ParseMode.HTML,
-        )
-        await q.message.reply_text(
-            "📷 Ouvre le scanner :",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-                 [KeyboardButton("⬅️ Retour")]],
-                resize_keyboard=True,
-                one_time_keyboard=True,
-                is_persistent=False,
-            ),
+            reply_markup=keyboard,
         )
         return
 
@@ -1578,18 +1572,15 @@ FLOW_SECTIONS = {
 def flow_keyboard(flow: str, field: str, section: str | None = None):
     """Clavier d'un formulaire.
 
-    IMPORTANT : Telegram.WebApp.sendData() ne transmet les données au bot
-    que pour une Mini App lancée depuis un KeyboardButton (ReplyKeyboard).
-    Les anciens boutons InlineKeyboardButton(web_app=...) ouvraient bien la
-    caméra, mais le scan pouvait fermer la Mini App sans envoyer le résultat.
-    Pour les champs scannables, on utilise donc volontairement un
-    KeyboardButton(web_app=...).
+    Les champs qui utilisent la caméra sont lancés depuis un KeyboardButton
+    (ReplyKeyboard), car Telegram.WebApp.sendData() renvoie les données au bot
+    avec ce type de lancement. Les champs ordinaires gardent le clavier inline
+    d'origine.
     """
     sec = section or FLOW_SECTIONS.get(flow, "")
-
     if field in FLOW_SCAN_FIELDS.get(flow, set()):
         url = (
-            f"{SCANNER_WEBAPP_URL}&mode=flow"
+            f"{SCANNER_WEBAPP_URL}?mode=flow"
             f"&section={sec}&field={field}"
         )
         return ReplyKeyboardMarkup(
@@ -1599,8 +1590,6 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
             one_time_keyboard=True,
             is_persistent=False,
         )
-
-    # Pour les champs qui ne sont pas scannables, on revient au clavier inline.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("↩️ Retour", callback_data=f"v2menu:{sec}" if sec else "home")]
     ])
@@ -1735,26 +1724,25 @@ async def v2_handler(update, context):
         context.user_data["v2_search"] = sec
         await q.edit_message_text("🔎 Envoie le terme à rechercher.", reply_markup=back_menu()); return
     if act == "scan":
-        # Scanner contextuel : même règle que les formulaires. Le bouton
-        # WebApp est un KeyboardButton pour que sendData() revienne au bot.
+        # Scanner contextuel : il utilise la même WebApp caméra que le scanner principal,
+        # mais n'ajoute pas automatiquement un appareil au stock. Le résultat est
+        # conservé dans user_data["last_scan"] pour l'utiliser dans la saisie en cours.
         context.user_data["scan_mode"] = True
         context.user_data["scan_context"] = sec
+        keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+             [KeyboardButton("⬅️ Retour")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            is_persistent=False,
+        )
         await q.edit_message_text(
-            f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\n\n"
-            "Scanne un IMEI, un QR code ou un code-barres.\n"
-            "Le résultat sera renvoyé ici et mémorisé pour cette section.\n\n"
+            f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\\n\\n"
+            "Scanne un IMEI, un QR code ou un code-barres.\\n"
+            "Le résultat sera renvoyé ici et mémorisé pour cette section.\\n\\n"
             "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
             parse_mode=ParseMode.HTML,
-        )
-        await q.message.reply_text(
-            "📷 Ouvre le scanner :",
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-                 [KeyboardButton("⬅️ Retour")]],
-                resize_keyboard=True,
-                one_time_keyboard=True,
-                is_persistent=False,
-            ),
+            reply_markup=keyboard,
         )
         return
 
@@ -2221,7 +2209,8 @@ async def v2_text_router(update, context):
         )
         return True
 
-    # Les boutons Retour des scanners sont des textes normaux (ReplyKeyboard).
+    # Les boutons Retour associés aux scanners sont des messages texte
+    # (ReplyKeyboard), pas des callback queries.
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_context"):
         sec = context.user_data.get("scan_context") or ""
         context.user_data.clear()
@@ -2235,19 +2224,11 @@ async def v2_text_router(update, context):
         await update.effective_message.reply_text("Menu principal :", reply_markup=menu())
         return True
 
-    # Le bouton Retour du clavier de scan est un texte normal (ReplyKeyboard).
-    # Il faut donc l'intercepter avant de le traiter comme une valeur de champ.
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
         sec = context.user_data.get("v2_section") or ""
         context.user_data.clear()
-        await update.effective_message.reply_text(
-            "↩️ Retour.",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        await update.effective_message.reply_text(
-            "Choisis une action :",
-            reply_markup=v2_keyboard(sec) if sec else menu(),
-        )
+        await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
+        await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
         return True
 
     flow=context.user_data.get("v2_flow")
@@ -2260,11 +2241,7 @@ async def v2_text_router(update, context):
                     await update.effective_message.reply_text("❌ Réponds <b>FRP</b> ou <b>iCloud</b>.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
             f[key]=txt; context.user_data["v2_step"]=step+1
             if step == len(steps):
-                # Le scanner est lancé depuis un ReplyKeyboard : on le retire
-                # avant d'afficher le menu final.
-                await update.effective_message.reply_text(
-                    "", reply_markup=ReplyKeyboardRemove()
-                )
+                await update.effective_message.reply_text("", reply_markup=ReplyKeyboardRemove())
                 await _finish_flow(update,context,flow,f)
             else:
                 next_key, next_prompt = steps[step]
