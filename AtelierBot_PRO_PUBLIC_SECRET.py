@@ -775,24 +775,39 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "scan_device":
+        # Scanner principal : on sépare le message d'information du
+        # ReplyKeyboard caméra. C'est plus fiable dans Telegram que de
+        # mettre le clavier caméra directement sur edit_message_text().
         context.user_data.clear()
         context.user_data["scan_mode"] = True
-        keyboard = ReplyKeyboardMarkup(
-            [[KeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-             [KeyboardButton("⬅️ Retour")]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-            is_persistent=False,
-        )
+
         await q.edit_message_text(
             "📷 <b>SCANNER UN APPAREIL</b>\n\n"
-            "Le bouton ci-dessous ouvre la <b>caméra de ton téléphone directement dans Telegram</b>.\n\n"
-            "1️⃣ Choisis la référence stock dans le scanner.\n"
-            "2️⃣ Cadre l'IMEI, le code-barres ou le QR code.\n"
-            "3️⃣ Le résultat revient automatiquement dans le bot et ajoute l'appareil au stock.\n\n"
-            "⚠️ La page doit être publiée en HTTPS (GitHub Pages convient).",
+            "Le bouton caméra ci-dessous ouvre la caméra directement dans Telegram.\n\n"
+            "1️⃣ Choisis la référence stock dans la page scanner.\n"
+            "2️⃣ Scanne l’IMEI, le code-barres ou le QR code.\n"
+            "3️⃣ Le résultat revient automatiquement ici et l’appareil est ajouté au stock.\n\n"
+            "⚠️ Appuie sur <b>Ouvrir la caméra</b> ci-dessous.",
             parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Retour", callback_data="home")]
+            ]),
+        )
+
+        await q.message.reply_text(
+            "📷 <b>Caméra prête</b>\n"
+            "Appuie sur <b>Ouvrir la caméra</b> pour lancer le scanner.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton(
+                    "📷 Ouvrir la caméra",
+                    web_app=WebAppInfo(url=f"{SCANNER_WEBAPP_URL}?mode=device")
+                )],
+                 [KeyboardButton("⬅️ Retour")]],
+                resize_keyboard=True,
+                one_time_keyboard=False,
+                is_persistent=False,
+            ),
         )
         return
 
@@ -1550,13 +1565,13 @@ def v2_text(section, qry=None, current_chat_id=None):
 # Champs de formulaires pour lesquels un scan caméra est utile.
 # Le scan direct remplit le champ courant puis passe automatiquement au suivant.
 FLOW_SCAN_FIELDS = {
-    "stock_add_v2": {"reference"},
+    "stock_add_v2": {"produit", "reference"},
     "commande_add": {"numero"},
     "livraison_add": {"commande", "suivi"},
     "movement_in": {"reference"},
     "movement_out": {"reference"},
     "reparation": {"numero", "imei", "etiquette"},
-    "deblocage": {"imei"},
+    "deblocage": {"appareil", "imei"},
     "rupture_add": {"reference"},
 }
 
