@@ -289,7 +289,7 @@ def dashboard_metrics() -> dict[str, Any]:
     #   même s'il est encore "EN ATTENTE", car le prix est saisi lors
     #   de la création du dossier.
     revenue_repairs = [x for x in repairs if _is_finished(x.get("statut"))]
-    revenue_unlocks = unlocks
+    revenue_unlocks = [x for x in unlocks if str(x.get("statut", "")).upper() != "ANNULÉE"]
     revenue_day = (
         sum(_amount(x) for x in revenue_repairs if same_day(x, now))
         + sum(_amount(x) for x in revenue_unlocks if same_day(x, now))
@@ -1357,11 +1357,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 V2_SECTIONS = {
  "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete")]),
- "ruptures": ("🚨 RUPTURES", [("➕ Ajouter", "v2act:ruptures:add"), ("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search")]),
+ "ruptures": ("🚨 RUPTURES", [("➕ Ajouter", "v2act:ruptures:add"), ("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search"), ("↩️ Annuler la rupture", "v2act:ruptures:cancel")]),
  "commandes": ("📋 COMMANDES", [("➕ Ajouter", "v2act:commandes:add"), ("📋 Voir", "v2act:commandes:list"), ("🔎 Rechercher", "v2act:commandes:search"), ("✏️ Modifier", "v2act:commandes:edit"), ("🗑️ Supprimer", "v2act:commandes:delete")]),
  "livraisons": ("🚚 LIVRAISONS", [("➕ Ajouter", "v2act:livraisons:add"), ("📋 Voir", "v2act:livraisons:list"), ("🔎 Rechercher", "v2act:livraisons:search"), ("✏️ Modifier", "v2act:livraisons:edit"), ("🗑️ Supprimer", "v2act:livraisons:delete")]),
  "reparations": ("🔧 RÉPARATIONS", [("➕ Ajouter une réparation", "v2act:reparations:add"), ("📋 Voir", "v2act:reparations:list"), ("🔎 Rechercher", "v2act:reparations:search"), ("✏️ Modifier", "v2act:reparations:edit"), ("🗑️ Supprimer", "v2act:reparations:delete"), ("⏸️ Pause", "v2act:reparations:pause"), ("▶️ Reprendre", "v2act:reparations:resume"), ("📦 Attente pièce", "v2act:reparations:parts"), ("👤 Attente client", "v2act:reparations:customer"), ("🧪 À tester", "v2act:reparations:test"), ("✅ Terminer", "v2act:reparations:done"), ("📦 Livrée", "v2act:reparations:delivered"), ("❌ Annuler", "v2act:reparations:cancel")]),
- "deblocages": ("🔓 DÉBLOCAGES", [("➕ Nouveau dossier", "v2act:deblocages:add"), ("📋 Voir", "v2act:deblocages:list"), ("🔎 Rechercher", "v2act:deblocages:search")]),
+ "deblocages": ("🔓 DÉBLOCAGES", [("➕ Nouveau dossier", "v2act:deblocages:add"), ("📋 Voir", "v2act:deblocages:list"), ("🔎 Rechercher", "v2act:deblocages:search"), ("✏️ Modifier", "v2act:deblocages:edit"), ("🗑️ Supprimer", "v2act:deblocages:delete"), ("❌ Annuler", "v2act:deblocages:cancel")]),
  "fournisseurs": ("🏢 FOURNISSEURS", [("➕ Ajouter", "v2act:fournisseurs:add"), ("📋 Voir", "v2act:fournisseurs:list"), ("🔎 Rechercher", "v2act:fournisseurs:search"), ("✏️ Modifier", "v2act:fournisseurs:edit"), ("🗑️ Supprimer", "v2act:fournisseurs:delete")]),
  "mouvements": ("📥📤 MOUVEMENTS", [("📥 Entrée", "v2act:mouvements:in"), ("📤 Sortie", "v2act:mouvements:out"), ("📋 Historique", "v2act:mouvements:list")]),
  "collaborateurs": ("👥 COLLABORATEURS", [("➕ Ajouter", "v2act:collaborateurs:add"), ("📋 Voir", "v2act:collaborateurs:list"), ("🗑️ Révoquer", "v2act:collaborateurs:delete"), ("🛡️ Gérer les rôles", "v2act:collaborateurs:roles")]),
@@ -1502,6 +1502,24 @@ async def v2_handler(update, context):
             parse_mode=ParseMode.HTML, reply_markup=back_menu()
         ); return
 
+    if sec == "ruptures" and act == "cancel":
+        context.user_data["v2_rupture_cancel"] = True
+        await q.edit_message_text(
+            "↩️ <b>ANNULER UNE RUPTURE</b>\n\n"
+            "Envoie la référence du produit.\n"
+            "Le bot cherchera la dernière rupture forcée de cette référence "
+            "et restaurera le stock qu'elle avait avant la rupture.",
+            parse_mode=ParseMode.HTML, reply_markup=back_menu()
+        ); return
+
+    if sec == "deblocages" and act == "cancel":
+        context.user_data["v2_deblocage_cancel"] = True
+        await q.edit_message_text(
+            "❌ <b>ANNULER UN DÉBLOCAGE</b>\n\n"
+            "Envoie le numéro du dossier (ex. DB-00001), l'IMEI ou un élément permettant de l'identifier.",
+            parse_mode=ParseMode.HTML, reply_markup=back_menu()
+        ); return
+
     flow_specs = {
         ("commandes", "add"): ("commande_add", [("numero", "1/4 — Numéro de commande ?"), ("fournisseur", "2/4 — Fournisseur ?"), ("montant", "3/4 — Montant ?"), ("statut", "4/4 — Statut ?")], "📋 <b>NOUVELLE COMMANDE</b>\n\n1/4 — Numéro de commande ?"),
         ("livraisons", "add"): ("livraison_add", [("commande", "1/5 — Numéro de commande ?"), ("transporteur", "2/5 — Transporteur ?"), ("suivi", "3/5 — Numéro de suivi ?"), ("date_prevue", "4/5 — Date prévue ?"), ("statut", "5/5 — Statut ?")], "🚚 <b>NOUVELLE LIVRAISON</b>\n\n1/5 — Numéro de commande ?"),
@@ -1619,15 +1637,145 @@ async def v2_text_router(update, context):
         sec = context.user_data.pop("v2_search")
         await update.effective_message.reply_text(v2_text(sec, txt, current_chat_id=update.effective_chat.id), reply_markup=v2_keyboard(sec), parse_mode=ParseMode.HTML); return True
 
+    if context.user_data.get("v2_rupture_cancel"):
+        context.user_data.pop("v2_rupture_cancel", None)
+        ref = txt.strip()
+        candidate = next(
+            (
+                m for m in reversed(DB.get("mouvements", []))
+                if str(m.get("type", "")).upper() == "RUPTURE_FORCEE"
+                and str(m.get("reference", "")).strip().lower() == ref.lower()
+            ),
+            None,
+        )
+        if not candidate:
+            await update.effective_message.reply_text(
+                "❌ Aucune rupture forcée trouvée pour cette référence.",
+                reply_markup=v2_keyboard("ruptures")
+            ); return True
+        item = next(
+            (x for x in DB.get("stock", []) if str(x.get("reference", "")).strip().lower() == ref.lower()),
+            None,
+        )
+        if not item:
+            await update.effective_message.reply_text("❌ Référence stock introuvable.", reply_markup=v2_keyboard("ruptures")); return True
+        current = int(item.get("quantite", 0))
+        before = int(candidate.get("avant", 0))
+        item["quantite"] = before
+        item["updated_at"] = now_iso()
+        DB.setdefault("mouvements", []).append({
+            "date": now_iso(), "reference": item.get("reference"),
+            "type": "ANNULATION_RUPTURE", "quantite": before - current,
+            "avant": current, "apres": before, "chat_id": update.effective_chat.id
+        })
+        log_activity(update.effective_chat.id, "ANNULATION_RUPTURE", str(item.get("reference")))
+        save_db(DB)
+        await update.effective_message.reply_text(
+            f"↩️ <b>Rupture annulée.</b>\n\n"
+            f"🔖 Référence : <code>{esc(item.get('reference'))}</code>\n"
+            f"📦 Stock restauré : <b>{before}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=v2_keyboard("ruptures")
+        ); return True
+
+    if context.user_data.get("v2_deblocage_cancel"):
+        context.user_data.pop("v2_deblocage_cancel", None)
+        needle = txt.lower()
+        found = next(
+            (
+                x for x in DB.get("deblocages", [])
+                if needle in " ".join(str(v) for v in x.values()).lower()
+            ),
+            None,
+        )
+        if not found:
+            await update.effective_message.reply_text("❌ Dossier de déblocage introuvable.", reply_markup=v2_keyboard("deblocages")); return True
+        old = found.get("statut", "EN ATTENTE")
+        if str(old).upper() == "ANNULÉE":
+            await update.effective_message.reply_text("ℹ️ Ce dossier est déjà annulé.", reply_markup=v2_keyboard("deblocages")); return True
+        found["statut"] = "ANNULÉE"
+        found.setdefault("historique", []).append({
+            "date": now_iso(), "action": "annulation",
+            "ancien": old, "nouveau": "ANNULÉE",
+            "user": str(update.effective_chat.id)
+        })
+        save_db(DB)
+        await update.effective_message.reply_text(
+            f"❌ <b>Dossier annulé.</b>\n\n🔖 {esc(found.get('numero', ''))}",
+            parse_mode=ParseMode.HTML, reply_markup=v2_keyboard("deblocages")
+        ); return True
+
     if context.user_data.get("v2_search_action"):
         sec, act = context.user_data.pop("v2_search_action")
         items = DB.get(sec, [])
         found = next((x for x in items if txt.lower() in " ".join(str(v) for v in x.values()).lower()), None)
-        if not found: await update.effective_message.reply_text("❌ Élément introuvable.", reply_markup=v2_keyboard(sec)); return True
+        if not found:
+            await update.effective_message.reply_text("❌ Élément introuvable.", reply_markup=v2_keyboard(sec)); return True
         if act == "delete":
-            items.remove(found); save_db(DB); await update.effective_message.reply_text("🗑️ Élément supprimé.", reply_markup=v2_keyboard(sec)); return True
+            items.remove(found)
+            save_db(DB)
+            await update.effective_message.reply_text("🗑️ Élément supprimé.", reply_markup=v2_keyboard(sec))
+            return True
+        if sec == "deblocages":
+            context.user_data["v2_deblocage_edit_target"] = found
+            await update.effective_message.reply_text(
+                "✏️ <b>MODIFIER LE DÉBLOCAGE</b>\n\n"
+                "Quel champ veux-tu modifier ?\n"
+                "• <b>type</b> — FRP / Google ou iCloud / Apple\n"
+                "• <b>appareil</b>\n"
+                "• <b>imei</b>\n"
+                "• <b>client</b>\n"
+                "• <b>montant</b>\n"
+                "• <b>statut</b>",
+                parse_mode=ParseMode.HTML, reply_markup=back_menu()
+            ); return True
         context.user_data["v2_edit_target"]=(sec, found)
         await update.effective_message.reply_text("✏️ Envoie le nouveau texte pour remplacer le champ <b>statut</b> (ou la valeur à corriger).", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
+
+    if context.user_data.get("v2_deblocage_edit_target") and not context.user_data.get("v2_deblocage_edit_field"):
+        found = context.user_data["v2_deblocage_edit_target"]
+        field = txt.strip().lower()
+        allowed = {"type", "appareil", "imei", "client", "montant", "statut"}
+        if field not in allowed:
+            await update.effective_message.reply_text("❌ Champ invalide. Choisis : type, appareil, imei, client, montant ou statut.", reply_markup=back_menu()); return True
+        context.user_data["v2_deblocage_edit_field"] = field
+        prompts = {
+            "type": "Envoie FRP / Google ou iCloud / Apple.",
+            "appareil": "Envoie le nouveau modèle/appareil.",
+            "imei": "Envoie le nouvel IMEI (ou -).",
+            "client": "Envoie le nouveau client.",
+            "montant": "Envoie le nouveau montant.",
+            "statut": "Envoie le nouveau statut (EN ATTENTE, EN COURS, TERMINÉE, ANNULÉE, etc.).",
+        }
+        await update.effective_message.reply_text("✏️ " + prompts[field], parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
+
+    if context.user_data.get("v2_deblocage_edit_field"):
+        field = context.user_data.pop("v2_deblocage_edit_field")
+        found = context.user_data.pop("v2_deblocage_edit_target")
+        if field == "montant":
+            try:
+                found["montant"] = _safe_float(txt)
+            except ValueError:
+                context.user_data["v2_deblocage_edit_field"] = field
+                context.user_data["v2_deblocage_edit_target"] = found
+                await update.effective_message.reply_text("❌ Montant invalide. Réessaie.", reply_markup=back_menu()); return True
+        elif field == "type":
+            upper = txt.upper()
+            if upper not in {"FRP", "GOOGLE", "FRP / GOOGLE", "ICLOUD", "I-CLOUD", "ICLOUD / APPLE"}:
+                context.user_data["v2_deblocage_edit_field"] = field
+                context.user_data["v2_deblocage_edit_target"] = found
+                await update.effective_message.reply_text("❌ Réponds FRP / Google ou iCloud / Apple.", reply_markup=back_menu()); return True
+            found["type"] = "FRP / Google" if "FRP" in upper or "GOOGLE" in upper else "iCloud / Apple"
+        elif field == "imei":
+            found["imei"] = "" if txt.strip() == "-" else txt.strip()
+        else:
+            found[field] = txt.strip()
+        found.setdefault("historique", []).append({
+            "date": now_iso(), "action": "modification",
+            "champ": field, "nouvelle_valeur": found.get(field),
+            "user": str(update.effective_chat.id)
+        })
+        save_db(DB)
+        await update.effective_message.reply_text("✅ <b>Dossier de déblocage modifié.</b>", parse_mode=ParseMode.HTML, reply_markup=v2_keyboard("deblocages")); return True
 
     if context.user_data.get("v2_edit_target"):
         sec, found = context.user_data.pop("v2_edit_target"); found["statut"] = txt; save_db(DB); await update.effective_message.reply_text("✅ Élément modifié.", reply_markup=v2_keyboard(sec)); return True
