@@ -1,4 +1,6 @@
 import os
+import base64
+import io
 import json
 import html
 import logging
@@ -538,6 +540,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"\n🛠️ <b>{esc(x.get('numero'))}</b> • {esc(x.get('appareil'))}\n"
                 f"👤 {esc(x.get('client'))}\n"
                 f"🛠️ {esc(x.get('panne'))}\n"
+                f"🏷️ Étiquette : <code>{esc(x.get('etiquette', '-'))}</code>\n"
                 f"📌 {esc(x.get('statut'))} • 💶 {money(x.get('devis', 0))}"
             )
         await q.edit_message_text(
@@ -1543,7 +1546,7 @@ async def v2_handler(update, context):
         ("fournisseurs", "add"): ("fournisseur_add_v2", [("nom", "1/4 — Nom du fournisseur ?"), ("contact", "2/4 — Contact ?"), ("telephone", "3/4 — Téléphone ?"), ("email", "4/4 — E-mail (ou -) ?")], "🏢 <b>NOUVEAU FOURNISSEUR</b>\n\n1/4 — Nom du fournisseur ?"),
         ("mouvements", "in"): ("movement_in", [("reference", "1/2 — Référence stock ?"), ("quantite", "2/2 — Quantité à entrer ?")], "📥 <b>ENTRÉE STOCK</b>\n\n1/2 — Référence stock ?"),
         ("mouvements", "out"): ("movement_out", [("reference", "1/2 — Référence stock ?"), ("quantite", "2/2 — Quantité à sortir ?")], "📤 <b>SORTIE STOCK</b>\n\n1/2 — Référence stock ?"),
-        ("reparations", "add"): ("reparation", [("numero", "1/7 — Numéro de réparation ?"), ("appareil", "2/7 — Modèle/appareil ?"), ("client", "3/7 — Client ?"), ("panne", "4/7 — Panne ?"), ("imei", "5/7 — IMEI (ou -) ?"), ("devis", "6/7 — Prix/devis ?"), ("statut", "7/7 — Statut ?")], "🔧 <b>NOUVELLE RÉPARATION</b>\n\n1/7 — Numéro de réparation ?"),
+        ("reparations", "add"): ("reparation", [("numero", "1/8 — Numéro de réparation ?"), ("appareil", "2/8 — Modèle/appareil ?"), ("client", "3/8 — Client ?"), ("panne", "4/8 — Panne ?"), ("imei", "5/8 — IMEI (ou -) ?"), ("etiquette", "6/8 — Numéro d’étiquette hologramme ?"), ("devis", "7/8 — Prix/devis ?"), ("statut", "8/8 — Statut ?")], "🔧 <b>NOUVELLE RÉPARATION</b>\n\n1/8 — Numéro de réparation ?"),
         ("deblocages", "add"): ("deblocage", [("type", "1/5 — FRP / Google ou iCloud / Apple ?"), ("appareil", "2/5 — Modèle/appareil ?"), ("imei", "3/5 — IMEI (ou -) ?"), ("client", "4/5 — Client ?"), ("montant", "5/5 — Prix du déblocage ?")], "🔓 <b>NOUVEAU DOSSIER</b>\n\n1/5 — FRP / Google ou iCloud / Apple ?"),
     }
     spec = flow_specs.get((sec, act))
@@ -1609,9 +1612,31 @@ async def _finish_flow(update, context, flow, f):
         item["quantite"] = int(item.get("quantite",0)) + qty if flow == "movement_in" else int(item.get("quantite",0)) - qty
         item["updated_at"] = now_iso(); DB["mouvements"].append({"date":now_iso(),"reference":f["reference"],"type":"ENTREE" if flow=="movement_in" else "SORTIE","quantite":qty,"chat_id":cid})
     elif flow == "reparation":
-        try: f["devis"] = _safe_float(f["devis"])
-        except ValueError: await update.effective_message.reply_text("❌ Prix/devis invalide.", reply_markup=back_menu()); return True
-        DB["reparations"].append({"id":f"REP-{len(DB['reparations'])+1:05d}", "numero":f["numero"], "appareil":f["appareil"], "client":f["client"], "panne":f["panne"], "identifiant":"" if f["imei"]=="-" else f["imei"], "type_identifiant":"IMEI" if f["imei"]!="-" else "", "devis":f["devis"], "statut":f["statut"], "date":now_iso(), "historique":[]})
+        etiquette = str(f.get("etiquette", "")).strip()
+        if not etiquette or etiquette == "-":
+            await update.effective_message.reply_text(
+                "❌ Le numéro d’étiquette hologramme est obligatoire pour une réparation.\n\n"
+                "Envoie le numéro unique indiqué sur l’étiquette.",
+                reply_markup=back_menu()
+            )
+            context.user_data["v2_step"] = 6
+            return True
+        duplicate = next((x for x in DB.get("reparations", []) if str(x.get("etiquette", "")).strip().lower() == etiquette.lower()), None)
+        if duplicate:
+            await update.effective_message.reply_text(
+                f"❌ Cette étiquette hologramme est déjà utilisée sur la réparation <b>{esc(duplicate.get('numero',''))}</b>.\n\n"
+                "Chaque étiquette doit être unique. Envoie un autre numéro.",
+                parse_mode=ParseMode.HTML, reply_markup=back_menu()
+            )
+            context.user_data["v2_step"] = 6
+            return True
+        try:
+            f["devis"] = _safe_float(f["devis"])
+        except ValueError:
+            context.user_data["v2_step"] = 7
+            await update.effective_message.reply_text("❌ Prix/devis invalide. Réenvoie le montant.", reply_markup=back_menu())
+            return True
+        DB["reparations"].append({"id":f"REP-{len(DB['reparations'])+1:05d}", "numero":f["numero"], "appareil":f["appareil"], "client":f["client"], "panne":f["panne"], "identifiant":"" if f["imei"]=="-" else f["imei"], "type_identifiant":"IMEI" if f["imei"]!="-" else "", "etiquette":etiquette, "devis":f["devis"], "statut":f["statut"], "date":now_iso(), "historique":[]})
     elif flow == "rupture_add":
         ref = str(f.get("reference", "")).strip()
         item = next((x for x in DB.get("stock", []) if str(x.get("reference", "")).strip().lower() == ref.lower()), None)
@@ -2246,6 +2271,7 @@ def compta_menu_keyboard():
          InlineKeyboardButton("🧮 TVA", callback_data="compta:vat")],
         [InlineKeyboardButton("📚 Journal", callback_data="compta:journal"),
          InlineKeyboardButton("📤 Export FEC", callback_data="compta:fec")],
+        [InlineKeyboardButton("📎 Pièces jointes", callback_data="compta:attachments")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="home")],
     ])
 
@@ -2253,30 +2279,33 @@ def compta_section_keyboard(section):
     if section == "invoices":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Nouvelle facture", callback_data="compta:add_invoice")],
-            [InlineKeyboardButton("📎 Joindre / récupérer PDF-JPG", callback_data="compta:invoice_attachments")],
+            [InlineKeyboardButton("📎 Joindre un PDF / JPG", callback_data="compta:upload_invoice")],
             [InlineKeyboardButton("📋 Voir les factures", callback_data="compta:list_invoices")],
-            [InlineKeyboardButton("📎 Ajouter / récupérer un justificatif", callback_data="compta:invoice_attachments")],
+            [InlineKeyboardButton("📎 Voir / récupérer les fichiers", callback_data="compta:invoice_files")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "credits":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Nouvel avoir", callback_data="compta:add_credit")],
             [InlineKeyboardButton("📋 Voir les avoirs", callback_data="compta:list_credits")],
-            [InlineKeyboardButton("📎 Justificatifs", callback_data="compta:credit_attachments")],
+            [InlineKeyboardButton("📎 Joindre un PDF / JPG", callback_data="compta:upload_credit")],
+            [InlineKeyboardButton("📎 Voir / récupérer les fichiers", callback_data="compta:credit_files")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "payments":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Ajouter encaissement", callback_data="compta:add_payment")],
             [InlineKeyboardButton("📋 Voir les encaissements", callback_data="compta:list_payments")],
-            [InlineKeyboardButton("📎 Justificatifs", callback_data="compta:payment_attachments")],
+            [InlineKeyboardButton("📎 Joindre un PDF / JPG", callback_data="compta:upload_payment")],
+            [InlineKeyboardButton("📎 Voir / récupérer les fichiers", callback_data="compta:payment_files")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "expenses":
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("➕ Ajouter dépense", callback_data="compta:add_expense")],
             [InlineKeyboardButton("📋 Voir les dépenses", callback_data="compta:list_expenses")],
-            [InlineKeyboardButton("📎 Factures / justificatifs", callback_data="compta:expense_attachments")],
+            [InlineKeyboardButton("📎 Joindre un PDF / JPG", callback_data="compta:upload_expense")],
+            [InlineKeyboardButton("📎 Voir / récupérer les fichiers", callback_data="compta:expense_files")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     if section == "bank":
@@ -2284,7 +2313,8 @@ def compta_section_keyboard(section):
             [InlineKeyboardButton("➕ Ajouter ligne bancaire", callback_data="compta:add_bank")],
             [InlineKeyboardButton("🔄 Rapprocher", callback_data="compta:reconcile")],
             [InlineKeyboardButton("📋 Voir la banque", callback_data="compta:list_bank")],
-            [InlineKeyboardButton("📎 Relevés / justificatifs", callback_data="compta:bank_attachments")],
+            [InlineKeyboardButton("📎 Joindre un PDF / JPG", callback_data="compta:upload_bank")],
+            [InlineKeyboardButton("📎 Voir / récupérer les fichiers", callback_data="compta:bank_files")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")],
         ])
     return compta_menu_keyboard()
@@ -2378,24 +2408,46 @@ async def compta_handle_callback(update, context):
             caption="📤 Export FEC — fichier généré par AtelierBot.\n⚠️ À faire valider par l'expert-comptable avant utilisation comme FEC légal."
         )
         await q.edit_message_text(
-            f"📤 <b>EXPORT FEC</b>\n\n✅ Fichier envoyé dans Telegram.\n🆔 <code>{esc(attachment['id'])}</code>\n\n"
-            "Il est également conservé dans la base JSON pour pouvoir être récupéré plus tard.",
-            reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+            f"📤 <b>EXPORT FEC</b>\n\n"
+            "✅ Le fichier vient d'être envoyé dans Telegram.\n"
+            f"🆔 <code>{esc(attachment['id'])}</code>\n\n"
+            "💾 Il est aussi conservé dans <code>data.json</code> pour être récupéré plus tard.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬇️ Récupérer les fichiers enregistrés", callback_data="compta:attachments")],
+                [InlineKeyboardButton("⬅️ Retour comptabilité", callback_data="compta:menu")]
+            ]),
+            parse_mode="HTML")
     elif action == "attachments":
         await compta_show_all_attachments(q, db)
     elif action in {"invoice_attachments","credit_attachments","payment_attachments","expense_attachments","bank_attachments"}:
         kind = action.split("_", 1)[0]
         await compta_choose_attachment_target(q, context, db, kind)
+    elif action.startswith("upload_"):
+        kind = action.split("_", 1)[1]
+        context.user_data["compta_attachment_target"] = f"document|{kind}"
+        await q.edit_message_text(
+            f"📎 <b>AJOUTER UN FICHIER — {esc(kind.upper())}</b>\n\n"
+            "Envoie maintenant le fichier depuis la 📎 pièce jointe Telegram (PDF, JPG, JPEG ou PNG).\n"
+            "Le fichier sera enregistré intégralement dans <code>data.json</code> et pourra être récupéré plus tard directement dans Telegram.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📎 Pièces jointes enregistrées", callback_data="compta:attachments")],
+                [InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{ {'invoice':'invoices','credit':'credits','payment':'payments','expense':'expenses','bank':'bank'}.get(kind,'menu')}")]
+            ])
+        )
     elif action.startswith("download_attachment:"):
         aid = action.split(":", 1)[1]
         await compta_send_attachment(q.message, db, aid)
+    elif action in {"invoice_files","credit_files","payment_files","expense_files","bank_files"}:
+        kind = action.split("_", 1)[0]
+        await compta_show_attachments_by_kind(q, db, kind)
     elif action.startswith("attach_to:"):
         target = action.split(":", 1)[1]
         context.user_data["compta_attachment_target"] = target
         await q.edit_message_text(
             "📎 <b>AJOUTER UNE PIÈCE JOINTE</b>\n\n"
-            "Envoie maintenant le PDF, JPG, JPEG ou PNG dans ce chat.\n"
-            "Le fichier sera copié intégralement dans <code>data.json</code> et pourra être récupéré plus tard.",
+            "Envoie maintenant le fichier depuis la 📎 pièce jointe Telegram (PDF, JPG, JPEG ou PNG).\n"
+            "Le fichier sera copié intégralement dans <code>data.json</code> et pourra être récupéré plus tard directement dans Telegram.",
             parse_mode="HTML", reply_markup=compta_menu_keyboard()
         )
     elif action in {"add_invoice","add_credit","add_payment","add_expense","add_bank"}:
@@ -2554,13 +2606,21 @@ async def compta_send_attachment(message, db, attachment_id):
         return False
     filename = attachment.get("file_name", "piece_jointe")
     mime = attachment.get("mime_type", "")
-    # Telegram accepte les PDF comme documents et les images peuvent aussi être
-    # envoyées comme document afin de préserver le fichier original à télécharger.
-    await message.reply_document(
-        document=io.BytesIO(data),
-        filename=filename,
-        caption=f"📎 {filename}\n🆔 {attachment.get('id')}"
-    )
+    # À la récupération, le fichier est envoyé DIRECTEMENT dans le chat Telegram.
+    # Les photos restent affichées comme photos ; les PDF/autres fichiers restent
+    # des documents téléchargeables avec leur nom d'origine.
+    caption = f"📎 {filename}\n🆔 {attachment.get('id')}"
+    if mime.startswith("image/") and Path(filename).suffix.lower() in {".jpg", ".jpeg", ".png"}:
+        await message.reply_photo(
+            photo=io.BytesIO(data),
+            caption=caption,
+        )
+    else:
+        await message.reply_document(
+            document=io.BytesIO(data),
+            filename=filename,
+            caption=caption,
+        )
     return True
 
 
@@ -2579,11 +2639,44 @@ async def compta_show_all_attachments(q, db):
         label = att.get("label") or att.get("record_number") or att.get("record_kind") or "Document"
         lines.append(f"\n📄 <b>{esc(att.get('file_name'))}</b>\n{esc(label)} • {size_mb:.2f} Mo • <code>{esc(att.get('id'))}</code>")
         buttons.append([InlineKeyboardButton(
-            f"⬇️ Récupérer {str(att.get('file_name',''))[:35]}",
+            f"📤 Envoyer dans Telegram : {str(att.get('file_name',''))[:28]}",
             callback_data=f"compta:download_attachment:{att.get('id')}"
         )])
     buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data="compta:menu")])
     await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons), parse_mode="HTML")
+
+
+async def compta_show_attachments_by_kind(q, db, kind):
+    items = [
+        a for a in _compta_iter_attachments(db)
+        if str(a.get("record_kind", "")).lower() == kind
+    ]
+    back = {"invoice":"invoices","credit":"credits","payment":"payments","expense":"expenses","bank":"bank"}.get(kind, "menu")
+    if not items:
+        await q.edit_message_text(
+            f"📎 <b>FICHIERS {esc(kind.upper())}</b>\n\nAucun fichier enregistré.",
+            reply_markup=compta_section_keyboard(back),
+            parse_mode="HTML"
+        )
+        return
+
+    buttons = []
+    lines = [f"📎 <b>FICHIERS {esc(kind.upper())}</b>", "━━━━━━━━━━━━━━━━━━━━"]
+    for att in items[-30:]:
+        lines.append(
+            f"\n📄 <b>{esc(att.get('file_name','document'))}</b> "
+            f"• <code>{esc(att.get('id',''))}</code>"
+        )
+        buttons.append([InlineKeyboardButton(
+            f"📤 Envoyer dans Telegram : {str(att.get('file_name','document'))[:28]}",
+            callback_data=f"compta:download_attachment:{att.get('id')}"
+        )])
+    buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{back}")])
+    await q.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="HTML"
+    )
 
 
 async def compta_choose_attachment_target(q, context, db, kind):
@@ -2650,15 +2743,23 @@ async def compta_receive_attachment(update: Update, context: ContextTypes.DEFAUL
             return True
 
         kind, ident = target.split("|", 1)
-        key = _compta_record_collections().get(kind)
-        records = compta_data(DB).get(key, []) if key else []
-        record = next((r for r in records if str(r.get("number") or r.get("id") or r.get("date") or "") == ident), None)
-        if not record:
-            await message.reply_text("❌ Élément comptable introuvable. Recommence depuis le menu Pièces jointes.")
-            context.user_data.pop("compta_attachment_target", None)
-            return True
 
-        attachment = compta_store_attachment(DB, kind, record, data, file_name, mime_type)
+        if kind == "document":
+            attachment = compta_store_document(
+                DB, data, file_name, mime_type,
+                doc_type=ident,
+                label=f"Pièce jointe {ident}"
+            )
+        else:
+            key = _compta_record_collections().get(kind)
+            records = compta_data(DB).get(key, []) if key else []
+            record = next((r for r in records if str(r.get("number") or r.get("id") or r.get("date") or "") == ident), None)
+            if not record:
+                await message.reply_text("❌ Élément comptable introuvable. Recommence depuis le menu Pièces jointes.")
+                context.user_data.pop("compta_attachment_target", None)
+                return True
+            attachment = compta_store_attachment(DB, kind, record, data, file_name, mime_type)
+
         save_db(DB)
         context.user_data.pop("compta_attachment_target", None)
         await message.reply_text(
@@ -2667,9 +2768,16 @@ async def compta_receive_attachment(update: Update, context: ContextTypes.DEFAUL
             f"📦 Taille : {len(data)/(1024*1024):.2f} Mo\n"
             f"🆔 <code>{esc(attachment['id'])}</code>\n\n"
             "💾 Le fichier complet est enregistré dans <code>data.json</code>.\n"
-            "Tu pourras le récupérer depuis 📎 Pièces jointes.",
+            "📤 Tu peux le récupérer à tout moment : il sera renvoyé directement dans ce chat Telegram, avec son format d’origine.",
             parse_mode=ParseMode.HTML,
-            reply_markup=compta_menu_keyboard(),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "📤 Envoyer ce fichier dans Telegram",
+                    callback_data=f"compta:download_attachment:{attachment['id']}"
+                )],
+                [InlineKeyboardButton("📎 Voir tous les fichiers", callback_data="compta:attachments")],
+                [InlineKeyboardButton("⬅️ Comptabilité", callback_data="compta:menu")],
+            ]),
         )
         return True
     except Exception as exc:
