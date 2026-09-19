@@ -1592,10 +1592,22 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
 
     Les champs qui utilisent la caméra sont lancés depuis un KeyboardButton
     (ReplyKeyboard), car Telegram.WebApp.sendData() renvoie les données au bot
-    avec ce type de lancement. Les champs ordinaires gardent le clavier inline
-    d'origine.
+    avec ce type de lancement. Les champs ordinaires gardent le clavier inline.
+
+    Pour le déblocage, la première étape (type) est un choix métier : on ne
+    scanne pas "FRP/iCloud" avec la caméra. On affiche donc directement les
+    deux choix afin de pouvoir passer proprement à l'étape appareil, qui elle
+    dispose bien du scanner.
     """
     sec = section or FLOW_SECTIONS.get(flow, "")
+
+    if flow == "deblocage" and field == "type":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔓 FRP / Google", callback_data="deblocage_type:FRP")],
+            [InlineKeyboardButton("🍎 iCloud / Apple", callback_data="deblocage_type:iCloud")],
+            [InlineKeyboardButton("↩️ Retour", callback_data=f"v2menu:{sec}" if sec else "home")],
+        ])
+
     if field in FLOW_SCAN_FIELDS.get(flow, set()):
         # Le bouton reste INLINE pour ne jamais bloquer les autres boutons
         # du sous-menu. Au clic, flow_scan_callback ouvre un vrai
@@ -1608,6 +1620,40 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("↩️ Retour", callback_data=f"v2menu:{sec}" if sec else "home")]
     ])
+
+
+async def deblocage_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Choix FRP/Google ou iCloud/Apple pour démarrer un dossier."""
+    q = update.callback_query
+    if not q or not await require_access(update):
+        return
+    await q.answer()
+
+    if context.user_data.get("v2_flow") != "deblocage":
+        await q.answer("⚠️ Ce dossier n'est plus actif.", show_alert=True)
+        return
+
+    value = (q.data or "").split(":", 1)[-1]
+    if value not in {"FRP", "iCloud"}:
+        await q.answer("Choix invalide.", show_alert=True)
+        return
+
+    steps = context.user_data.get("v2_steps", [])
+    if not steps:
+        await q.answer("⚠️ Formulaire introuvable.", show_alert=True)
+        return
+
+    form = context.user_data.setdefault("v2_form", {})
+    form["type"] = value
+    context.user_data["v2_step"] = 2
+
+    next_key, next_prompt = steps[1]
+    section = context.user_data.get("v2_section") or "deblocages"
+    await q.edit_message_text(
+        f"✅ Type : <b>{esc(value)}</b>\n\n{next_prompt}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=flow_keyboard("deblocage", next_key, section),
+    )
 
 
 def context_scanner_keyboard(section: str):
@@ -2382,6 +2428,7 @@ def build_app() -> Application:
     app.add_handler(stock_conv)
     app.add_handler(supplier_conv)
     app.add_handler(CallbackQueryHandler(flow_scan_callback, pattern=r"^flow_scan:"))
+    app.add_handler(CallbackQueryHandler(deblocage_type_callback, pattern=r"^deblocage_type:"))
     app.add_handler(CallbackQueryHandler(v2_handler, pattern=r"^v2(menu|act):"))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, scanner_webapp))
