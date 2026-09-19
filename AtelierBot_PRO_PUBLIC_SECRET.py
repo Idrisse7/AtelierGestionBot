@@ -91,39 +91,58 @@ def default_db() -> dict[str, Any]:
     }
 
 
-def save_db(db: dict[str, Any], make_backup: bool = True) -> None:
+def save_db(db: dict[str, Any], make_backup: bool = False) -> None:
+    """Sauvegarde atomique sans créer de copies JSON en clair.
+
+    data.json est uniquement le fichier de travail du runner.
+    Le workflow main.yml le chiffre ensuite dans data.enc.
+    """
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    if make_backup and DATA_FILE.exists():
-        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup = BACKUP_DIR / f"data_{stamp}.json"
-        try:
-            shutil.copy2(DATA_FILE, backup)
-            backups = sorted(BACKUP_DIR.glob("data_*.json"))
-            for old in backups[:-20]:
-                old.unlink(missing_ok=True)
-        except OSError:
-            log.warning("Sauvegarde locale impossible", exc_info=True)
-
     fd, tmp_name = tempfile.mkstemp(
-        prefix="atelier_", suffix=".json", dir=str(DATA_FILE.parent)
+        prefix=".atelier_", suffix=".json.tmp", dir=str(DATA_FILE.parent)
     )
     try:
+        try:
+            os.chmod(tmp_name, 0o600)
+        except OSError:
+            pass
+
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(db, f, ensure_ascii=False, indent=2)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
+
         os.replace(tmp_name, DATA_FILE)
+
+        try:
+            os.chmod(DATA_FILE, 0o600)
+        except OSError:
+            pass
     finally:
         try:
             Path(tmp_name).unlink(missing_ok=True)
         except OSError:
             pass
 
+def _remove_plaintext_backups() -> None:
+    """Supprime les anciennes sauvegardes JSON en clair d'une version précédente."""
+    if not BACKUP_DIR.exists():
+        return
+    for old in BACKUP_DIR.glob("data_*.json"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    try:
+        BACKUP_DIR.rmdir()
+    except OSError:
+        pass
+
 
 def load_db() -> dict[str, Any]:
+    _remove_plaintext_backups()
     if not DATA_FILE.exists():
         db = default_db()
         save_db(db)
