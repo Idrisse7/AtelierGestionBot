@@ -1228,27 +1228,26 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text("❌ IMEI invalide (15 chiffres + contrôle Luhn).")
                 return
 
-        if flow_field in {"numero", "commande", "suivi", "reference", "etiquette"}:
+        if flow_field in {"numero", "commande", "suivi", "reference", "etiquette", "produit", "appareil"}:
             if not re.search(r"[A-Za-z0-9]", value):
-                await msg.reply_text("❌ Numéro scanné invalide.")
+                await msg.reply_text("❌ Valeur scannée invalide.")
+                return
+
+        # Le champ "type" du déblocage reste un texte libre à la saisie
+        # manuelle (FRP/Google ou iCloud/Apple) : même règle si on le scanne.
+        if flow == "deblocage" and flow_field == "type":
+            if value.upper() not in {"FRP", "GOOGLE", "FRP / GOOGLE", "ICLOUD", "I-CLOUD", "ICLOUD / APPLE"}:
+                await msg.reply_text("❌ Le code scanné doit correspondre à FRP ou iCloud.")
                 return
 
         form[flow_field] = value
         context.user_data["v2_step"] = step + 1
 
-        # Supprime l'ancien message qui portait le clavier caméra pour éviter
-        # l'accumulation de "Caméra prête" à chaque ouverture.
-        prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-        if prompt_id:
-            try:
-                await context.bot.delete_message(
-                    chat_id=update.effective_chat.id,
-                    message_id=int(prompt_id),
-                )
-            except Exception:
-                pass
-
-        await msg.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
+        # Supprime l'ancien message qui portait le clavier caméra ET retire
+        # le clavier Telegram associé, pour éviter l'accumulation de
+        # "Caméra prête" à chaque ouverture — sans jamais envoyer de
+        # message vide (Telegram refuse text="").
+        await _dismiss_camera_keyboard(context, update.effective_chat.id)
 
         if step == len(steps):
             await _finish_flow(update, context, flow, form)
@@ -1282,16 +1281,7 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Nettoyage du message/clavier de la caméra après réception.
-    prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-    if prompt_id:
-        try:
-            await context.bot.delete_message(
-                chat_id=update.effective_chat.id,
-                message_id=int(prompt_id),
-            )
-        except Exception:
-            pass
-    await msg.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
+    await _dismiss_camera_keyboard(context, update.effective_chat.id)
 
     # Scanner contextuel depuis un sous-menu : on mémorise le résultat sans
     # toucher au stock.
@@ -1501,6 +1491,7 @@ async def stop_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _dismiss_camera_keyboard(context, update.effective_chat.id)
     context.user_data.clear()
     await update.effective_message.reply_text("❌ Opération annulée.", reply_markup=menu())
     return ConversationHandler.END
@@ -1594,13 +1585,13 @@ def v2_text(section, qry=None, current_chat_id=None):
 # Champs de formulaires pour lesquels un scan caméra est utile.
 # Le scan direct remplit le champ courant puis passe automatiquement au suivant.
 FLOW_SCAN_FIELDS = {
-    "stock_add_v2": {"reference"},
+    "stock_add_v2": {"produit", "reference"},
     "commande_add": {"numero"},
     "livraison_add": {"commande", "suivi"},
     "movement_in": {"reference"},
     "movement_out": {"reference"},
     "reparation": {"numero", "imei", "etiquette"},
-    "deblocage": {"imei"},
+    "deblocage": {"type", "appareil", "imei"},
     "rupture_add": {"reference"},
 }
 
@@ -1655,7 +1646,44 @@ def context_scanner_keyboard(section: str):
     )
 
 
-def _start_flow(context, flow, steps, section=None):
+async def _delete_camera_prompt(context, chat_id) -> bool:
+    """Supprime l'ancien message caméra (invite + clavier) s'il existe.
+
+    Retourne True si un message a réellement été supprimé, ce qui signifie
+    qu'un ReplyKeyboard (clavier caméra) était potentiellement encore actif
+    à l'écran de l'utilisateur.
+    """
+    prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+    if not prompt_id:
+        return False
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=int(prompt_id))
+    except Exception:
+        pass
+    return True
+
+
+async def _dismiss_camera_keyboard(context, chat_id):
+    """Nettoie l'invite caméra en cours ET retire le clavier Telegram associé.
+
+    N'envoie JAMAIS un message avec un texte vide (Telegram répond
+    "Bad Request: message text is empty" et le handler plante en silence).
+    Un ReplyKeyboardRemove n'a de sens QUE si un clavier caméra était
+    effectivement affiché : dans tous les autres cas (grande majorité des
+    étapes, remplies au clavier normal), on ne fait rien et on n'envoie
+    aucun message superflu.
+    """
+    had_prompt = await _delete_camera_prompt(context, chat_id)
+    if had_prompt:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text="✅", reply_markup=ReplyKeyboardRemove())
+        except Exception:
+            pass
+
+
+async def _start_flow(update, context, flow, steps, section=None):
+    chat_id = update.effective_chat.id
+    await _dismiss_camera_keyboard(context, chat_id)
     context.user_data.clear()
     context.user_data["v2_flow"] = flow
     context.user_data["v2_step"] = 1
@@ -1692,15 +1720,7 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
     # Si une ancienne fenêtre/message caméra est encore présent, on le supprime.
-    old_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
-    if old_prompt_id:
-        try:
-            await context.bot.delete_message(
-                chat_id=update.effective_chat.id,
-                message_id=int(old_prompt_id),
-            )
-        except Exception:
-            pass
+    await _delete_camera_prompt(context, update.effective_chat.id)
 
     prompt = await q.message.reply_text(
         "📷 <b>Caméra prête</b>\n"
@@ -1726,10 +1746,7 @@ async def v2_handler(update, context):
     if data.startswith("v2menu:"):
         sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
-            try:
-                await q.message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
-            except Exception:
-                pass
+            await _dismiss_camera_keyboard(context, update.effective_chat.id)
             await q.edit_message_text(
                 V2_SECTIONS[sec][0] + "\n\nChoisis une action :",
                 reply_markup=v2_keyboard(sec),
@@ -1742,10 +1759,7 @@ async def v2_handler(update, context):
         return
 
     if act != "scan":
-        try:
-            await q.message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
-        except Exception:
-            pass
+        await _dismiss_camera_keyboard(context, update.effective_chat.id)
 
     if sec == "collaborateurs" and act in {"add", "delete"} and not can_manage_users(update.effective_chat.id):
         await q.answer("🔒 Réservé à l’administrateur ou au modérateur.", show_alert=True)
@@ -1756,14 +1770,14 @@ async def v2_handler(update, context):
         return
 
     if sec == "collaborateurs" and act == "add":
-        _start_flow(context, "collaborateur_add", [("chat_id", "Envoie son Chat ID Telegram.")])
+        await _start_flow(update, context, "collaborateur_add", [("chat_id", "Envoie son Chat ID Telegram.")])
         await q.edit_message_text("👥 <b>AJOUTER UN COLLABORATEUR</b>\n\nEnvoie son <b>Chat ID Telegram</b>.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
     if sec == "collaborateurs" and act == "delete":
-        _start_flow(context, "collaborateur_revoke", [("needle", "Envoie son Chat ID, son nom ou son @username.")])
+        await _start_flow(update, context, "collaborateur_revoke", [("needle", "Envoie son Chat ID, son nom ou son @username.")])
         await q.edit_message_text("🗑️ <b>RÉVOQUER UN COLLABORATEUR</b>\n\nEnvoie son <b>Chat ID</b>, son nom ou son @username.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
 
     if sec == "collaborateurs" and act == "roles":
-        _start_flow(context, "collaborateur_role", [("needle", "Envoie son Chat ID, son nom ou son @username.")])
+        await _start_flow(update, context, "collaborateur_role", [("needle", "Envoie son Chat ID, son nom ou son @username.")])
         await q.edit_message_text(
             "🛡️ <b>GESTION DES RÔLES</b>\n\n"
             "Envoie le <b>Chat ID</b>, le nom ou le <b>@username</b> de la personne à modifier.",
@@ -1772,7 +1786,7 @@ async def v2_handler(update, context):
 
     if sec == "stock" and act == "add":
         steps = [("produit", "1/7 — Nom du produit/modèle ?"), ("reference", "2/7 — Référence interne ?"), ("quantite", "3/7 — Quantité ?"), ("prix_achat", "4/7 — Prix d'achat unitaire ?"), ("seuil", "5/7 — Seuil d'alerte ?"), ("emplacement", "6/7 — Emplacement ?"), ("fournisseur", "7/7 — Fournisseur ?")]
-        _start_flow(context, "stock_add_v2", steps, sec)
+        await _start_flow(update, context, "stock_add_v2", steps, sec)
         await q.edit_message_text("➕ <b>AJOUT STOCK</b>\n\n1/7 — Nom du produit/modèle ?", parse_mode=ParseMode.HTML, reply_markup=flow_keyboard("stock_add_v2", "produit", sec)); return
 
     if sec == "stock" and act == "inventory":
@@ -1799,7 +1813,7 @@ async def v2_handler(update, context):
 
     if sec == "ruptures" and act == "add":
         steps = [("reference", "Envoie la référence du produit à mettre en rupture.")]
-        _start_flow(context, "rupture_add", steps, sec)
+        await _start_flow(update, context, "rupture_add", steps, sec)
         await q.edit_message_text(
             "➕ <b>AJOUTER UNE RUPTURE</b>\n\n"
             "Envoie la <b>référence exacte</b> du produit existant.\n"
@@ -1837,7 +1851,7 @@ async def v2_handler(update, context):
     spec = flow_specs.get((sec, act))
     if spec:
         flow, steps, prompt = spec
-        _start_flow(context, flow, steps, sec)
+        await _start_flow(update, context, flow, steps, sec)
         await q.edit_message_text(
             prompt,
             parse_mode=ParseMode.HTML,
@@ -1853,13 +1867,14 @@ async def v2_handler(update, context):
         # Scanner contextuel : le menu reste cliquable. Le clavier caméra
         # est envoyé comme un message séparé (ReplyKeyboard), car Telegram
         # n'accepte pas ReplyKeyboardMarkup dans editMessageText.
+        await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         context.user_data["scan_mode"] = True
         context.user_data["scan_context"] = sec
         await q.edit_message_text(
-            f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\\n\\n"
-            "Scanne un IMEI, un QR code ou un code-barres.\\n"
-            "Le résultat sera renvoyé ici et mémorisé pour cette section.\\n\\n"
+            f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\n\n"
+            "Scanne un IMEI, un QR code ou un code-barres.\n"
+            "Le résultat sera renvoyé ici et mémorisé pour cette section.\n\n"
             "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
             parse_mode=ParseMode.HTML,
         )
@@ -2339,24 +2354,14 @@ async def v2_text_router(update, context):
     # (ReplyKeyboard), pas des callback queries.
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_context"):
         sec = context.user_data.get("scan_context") or ""
-        prompt_id = context.user_data.get("camera_prompt_message_id")
-        if prompt_id:
-            try:
-                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=int(prompt_id))
-            except Exception:
-                pass
+        await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
         return True
 
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_mode") and not context.user_data.get("v2_flow"):
-        prompt_id = context.user_data.get("camera_prompt_message_id")
-        if prompt_id:
-            try:
-                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=int(prompt_id))
-            except Exception:
-                pass
+        await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Menu principal :", reply_markup=menu())
@@ -2364,12 +2369,7 @@ async def v2_text_router(update, context):
 
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
         sec = context.user_data.get("v2_section") or ""
-        prompt_id = context.user_data.get("camera_prompt_message_id")
-        if prompt_id:
-            try:
-                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=int(prompt_id))
-            except Exception:
-                pass
+        await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
@@ -2384,14 +2384,16 @@ async def v2_text_router(update, context):
                 if txt.upper() not in {"FRP","GOOGLE","FRP / GOOGLE","ICLOUD","I-CLOUD","ICLOUD / APPLE"}:
                     await update.effective_message.reply_text("❌ Réponds <b>FRP</b> ou <b>iCloud</b>.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
             f[key]=txt; context.user_data["v2_step"]=step+1
+            # Champ rempli au clavier normal : on nettoie un éventuel clavier
+            # caméra resté ouvert pour CE champ (ne fait rien s'il n'y en avait
+            # pas, donc aucun message superflu dans l'immense majorité des cas).
+            await _dismiss_camera_keyboard(context, update.effective_chat.id)
             if step == len(steps):
-                await update.effective_message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
                 await _finish_flow(update,context,flow,f)
             else:
                 next_key, next_prompt = steps[step]
                 section = context.user_data.get("v2_section") or FLOW_SECTIONS.get(flow, "")
                 next_markup = flow_keyboard(flow, next_key, section)
-                await update.effective_message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
                 await update.effective_message.reply_text(
                     next_prompt,
                     parse_mode=ParseMode.HTML,
