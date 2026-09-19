@@ -775,39 +775,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "scan_device":
-        # Scanner principal : on sépare le message d'information du
-        # ReplyKeyboard caméra. C'est plus fiable dans Telegram que de
-        # mettre le clavier caméra directement sur edit_message_text().
         context.user_data.clear()
         context.user_data["scan_mode"] = True
-
+        keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+             [KeyboardButton("⬅️ Retour")]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            is_persistent=False,
+        )
         await q.edit_message_text(
             "📷 <b>SCANNER UN APPAREIL</b>\n\n"
-            "Le bouton caméra ci-dessous ouvre la caméra directement dans Telegram.\n\n"
-            "1️⃣ Choisis la référence stock dans la page scanner.\n"
-            "2️⃣ Scanne l’IMEI, le code-barres ou le QR code.\n"
-            "3️⃣ Le résultat revient automatiquement ici et l’appareil est ajouté au stock.\n\n"
-            "⚠️ Appuie sur <b>Ouvrir la caméra</b> ci-dessous.",
+            "Le bouton ci-dessous ouvre la <b>caméra de ton téléphone directement dans Telegram</b>.\n\n"
+            "1️⃣ Choisis la référence stock dans le scanner.\n"
+            "2️⃣ Cadre l'IMEI, le code-barres ou le QR code.\n"
+            "3️⃣ Le résultat revient automatiquement dans le bot et ajoute l'appareil au stock.\n\n"
+            "⚠️ La page doit être publiée en HTTPS (GitHub Pages convient).",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Retour", callback_data="home")]
-            ]),
-        )
-
-        await q.message.reply_text(
-            "📷 <b>Caméra prête</b>\n"
-            "Appuie sur <b>Ouvrir la caméra</b> pour lancer le scanner.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=ReplyKeyboardMarkup(
-                [[KeyboardButton(
-                    "📷 Ouvrir la caméra",
-                    web_app=WebAppInfo(url=f"{SCANNER_WEBAPP_URL}?mode=device")
-                )],
-                 [KeyboardButton("⬅️ Retour")]],
-                resize_keyboard=True,
-                one_time_keyboard=False,
-                is_persistent=False,
-            ),
+            reply_markup=keyboard,
         )
         return
 
@@ -1177,46 +1162,28 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ref = str(payload.get("reference", "")).strip()
-    value = str(payload.get("value", "")).strip()
+    value = str(payload.get("value", "")).strip().replace(" ", "")
     kind_hint = str(payload.get("type", "")).upper()
 
-    # Mode formulaire : le scan remplit LE CHAMP COURANT du formulaire.
-    # IMPORTANT : un numéro de suivi peut contenir des tirets, slashs, points
-    # ou d'autres séparateurs et ne doit donc pas être rejeté par la validation
-    # générique "barcode" avant d'arriver au traitement du champ.
-    flow = context.user_data.get("v2_flow")
-    flow_field = str(payload.get("field", "")).strip()
-    flow_section = str(payload.get("section", "")).strip()
-
     # Détermine le type du code.
-    # Pour un formulaire, le champ courant est prioritaire : un QR/code-barres
-    # peut contenir un IMEI, un numéro de commande, un suivi, une référence,
-    # une étiquette, un modèle, etc. On ne doit donc PAS appliquer la validation
-    # générique du scanner avant le traitement du champ.
     is_imei = value.isdigit() and len(value) == 15
-    flow_scan_field = bool(
-        flow
-        and flow_field
-        and flow_field in FLOW_SCAN_FIELDS.get(flow, set())
-    )
     if is_imei:
         if not valid_imei(value):
             await msg.reply_text("❌ IMEI invalide (contrôle Luhn échoué).")
             return
         kind = "IMEI"
-    elif flow_scan_field:
-        # Validation minimale ici ; la validation spécifique au champ est faite
-        # juste après (notamment IMEI et type de déblocage).
-        kind = "QR" if kind_hint == "QR" else "CODE_BARRES"
     elif valid_barcode(value) or kind_hint in {"QR", "BARCODE", "CODE_BARRES"}:
         kind = "QR" if kind_hint == "QR" else "CODE_BARRES"
     else:
         await msg.reply_text("❌ Code non reconnu.")
         return
 
-    # Le scan remplit LE CHAMP COURANT du formulaire,
+    # Mode formulaire : le scan remplit LE CHAMP COURANT du formulaire,
     # sans demander de référence stock. Le bot passe ensuite automatiquement
     # à l'étape suivante et réaffiche le bouton Scanner si nécessaire.
+    flow = context.user_data.get("v2_flow")
+    flow_field = str(payload.get("field", "")).strip()
+    flow_section = str(payload.get("section", "")).strip()
     if flow:
         steps = context.user_data.get("v2_steps", [])
         step = context.user_data.get("v2_step", 1)
@@ -1241,24 +1208,7 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not (value.isdigit() and len(value) == 15 and valid_imei(value)):
                 await msg.reply_text("❌ IMEI invalide (15 chiffres + contrôle Luhn).")
                 return
-        elif flow_field == "type":
-            # Le bouton caméra est disponible en plus de la saisie manuelle.
-            normalized_type = value.strip().upper().replace("-", "").replace(" ", "")
-            if normalized_type in {"FRP", "GOOGLE", "FRPGOOGLE"}:
-                value = "FRP"
-            elif normalized_type in {"ICLOUD", "APPLE", "ICLOUDAPPLE"}:
-                value = "iCloud"
-            else:
-                await msg.reply_text("❌ Le scan doit contenir FRP / Google ou iCloud / Apple.")
-                return
         elif not value or len(value) > 120:
-            await msg.reply_text("❌ Valeur scannée invalide.")
-            return
-
-        # Tous les champs déclarés dans FLOW_SCAN_FIELDS passent par cette
-        # validation minimale. Cela évite qu'une catégorie fonctionne et qu'une
-        # autre soit bloquée uniquement à cause du format du code retourné.
-        if flow_scan_field and (not value or len(value) > 120):
             await msg.reply_text("❌ Valeur scannée invalide.")
             return
 
@@ -1271,11 +1221,6 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         form[flow_field] = value
         context.user_data["v2_step"] = step + 1
-
-        # Nettoyage : toutes les anciennes invites caméra sont supprimées
-        # après un scan, y compris celles éventuellement laissées par une
-        # autre catégorie.
-        await delete_all_camera_prompts(context, msg.chat_id)
 
         # Le clavier ReplyKeyboard qui a servi à ouvrir la caméra est
         # toujours retiré après un scan. Le prochain champ utilise son propre
@@ -1301,10 +1246,6 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # toucher au stock. Le même moteur caméra reste ainsi réutilisé partout.
     scan_context = context.user_data.get("scan_context")
     if scan_context:
-        # Le message caméra utilisé pour ce scan est terminé : on le retire
-        # avant d'afficher le résultat afin d'éviter les doublons au retour.
-        await delete_all_camera_prompts(context, msg.chat_id)
-
         context.user_data["last_scan"] = {
             "value": value,
             "type": kind,
@@ -1509,7 +1450,6 @@ async def stop_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get("scan_mode"):
         await update.effective_message.reply_text("ℹ️ Aucun scan en cours.")
         return
-    await delete_all_camera_prompts(context, update.effective_chat.id)
     context.user_data.clear()
     await update.effective_message.reply_text(
         "🛑 <b>Scan terminé.</b>", parse_mode=ParseMode.HTML, reply_markup=menu()
@@ -1517,7 +1457,6 @@ async def stop_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await delete_all_camera_prompts(context, update.effective_chat.id)
     context.user_data.clear()
     await update.effective_message.reply_text("❌ Opération annulée.", reply_markup=menu())
     return ConversationHandler.END
@@ -1611,13 +1550,13 @@ def v2_text(section, qry=None, current_chat_id=None):
 # Champs de formulaires pour lesquels un scan caméra est utile.
 # Le scan direct remplit le champ courant puis passe automatiquement au suivant.
 FLOW_SCAN_FIELDS = {
-    "stock_add_v2": {"produit", "reference"},
+    "stock_add_v2": {"reference"},
     "commande_add": {"numero"},
     "livraison_add": {"commande", "suivi"},
     "movement_in": {"reference"},
     "movement_out": {"reference"},
     "reparation": {"numero", "imei", "etiquette"},
-    "deblocage": {"type", "appareil", "imei"},
+    "deblocage": {"imei"},
     "rupture_add": {"reference"},
 }
 
@@ -1638,19 +1577,10 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
 
     Les champs qui utilisent la caméra sont lancés depuis un KeyboardButton
     (ReplyKeyboard), car Telegram.WebApp.sendData() renvoie les données au bot
-    avec ce type de lancement. Les champs ordinaires gardent le clavier inline.
-
-    Pour le déblocage, le champ type reste un champ texte libre et possède
-    également le bouton caméra : on peut donc écrire FRP/iCloud à la main
-    ou scanner un QR/code-barres qui contient ce type. Les champs appareil/IMEI
-    gardent eux aussi le bouton caméra en plus de la saisie manuelle.
+    avec ce type de lancement. Les champs ordinaires gardent le clavier inline
+    d'origine.
     """
     sec = section or FLOW_SECTIONS.get(flow, "")
-
-    # Le champ Type de déblocage reste un champ texte libre :
-    # l'utilisateur peut écrire FRP / Google ou iCloud / Apple manuellement.
-    # On ne transforme surtout pas cette étape en menu de choix.
-
     if field in FLOW_SCAN_FIELDS.get(flow, set()):
         # Le bouton reste INLINE pour ne jamais bloquer les autres boutons
         # du sous-menu. Au clic, flow_scan_callback ouvre un vrai
@@ -1663,69 +1593,6 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("↩️ Retour", callback_data=f"v2menu:{sec}" if sec else "home")]
     ])
-
-
-async def deblocage_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Choix FRP/Google ou iCloud/Apple pour démarrer un dossier."""
-    q = update.callback_query
-    if not q or not await require_access(update):
-        return
-    await q.answer()
-
-    if context.user_data.get("v2_flow") != "deblocage":
-        await q.answer("⚠️ Ce dossier n'est plus actif.", show_alert=True)
-        return
-
-    value = (q.data or "").split(":", 1)[-1]
-    if value not in {"FRP", "iCloud"}:
-        await q.answer("Choix invalide.", show_alert=True)
-        return
-
-    steps = context.user_data.get("v2_steps", [])
-    if not steps:
-        await q.answer("⚠️ Formulaire introuvable.", show_alert=True)
-        return
-
-    form = context.user_data.setdefault("v2_form", {})
-    form["type"] = value
-    context.user_data["v2_step"] = 2
-
-    next_key, next_prompt = steps[1]
-    section = context.user_data.get("v2_section") or "deblocages"
-    await q.edit_message_text(
-        f"✅ Type : <b>{esc(value)}</b>\n\n{next_prompt}",
-        parse_mode=ParseMode.HTML,
-        reply_markup=flow_keyboard("deblocage", next_key, section),
-    )
-
-
-async def delete_all_camera_prompts(context, chat_id):
-    """Supprime toutes les anciennes invites caméra de ce chat.
-
-    Les formulaires et les scanners peuvent créer plusieurs messages caméra
-    au fil des catégories. On conserve leurs IDs dans chat_data (qui survit
-    à context.user_data.clear()) afin que Retour/Annuler puisse tous les
-    supprimer proprement, sans toucher aux messages du formulaire.
-    """
-    ids = context.chat_data.pop("camera_prompt_message_ids", []) or []
-    # Compatibilité avec l'ancien stockage mono-ID.
-    old_id = context.user_data.pop("camera_prompt_message_id", None)
-    if old_id:
-        ids.append(old_id)
-
-    seen = set()
-    for message_id in ids:
-        try:
-            mid = int(message_id)
-        except (TypeError, ValueError):
-            continue
-        if mid in seen:
-            continue
-        seen.add(mid)
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=mid)
-        except Exception:
-            pass
 
 
 def context_scanner_keyboard(section: str):
@@ -1779,13 +1646,9 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{SCANNER_WEBAPP_URL}?mode=flow"
         f"&section={section}&field={field}"
     )
-    # Nettoie toutes les anciennes invites caméra, même celles laissées par
-    # une autre catégorie ou une ouverture précédente.
-    await delete_all_camera_prompts(context, q.message.chat_id)
-
     # ReplyKeyboard séparé : c'est ce mécanisme qui permet à sendData()
     # de remonter les données au bot sous StatusUpdate.WEB_APP_DATA.
-    prompt_msg = await q.message.reply_text(
+    await q.message.reply_text(
         "📷 <b>Caméra prête</b>\n"
         "Scanne maintenant le QR/code-barres puis ferme la caméra.",
         parse_mode=ParseMode.HTML,
@@ -1797,7 +1660,6 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_persistent=False,
         ),
     )
-    context.chat_data.setdefault("camera_prompt_message_ids", []).append(prompt_msg.message_id)
 
 
 async def v2_handler(update, context):
@@ -1809,9 +1671,6 @@ async def v2_handler(update, context):
     if data.startswith("v2menu:"):
         sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
-            # Retour depuis un formulaire/scanner : aucune ancienne invite caméra
-            # ne doit rester dans le chat.
-            await delete_all_camera_prompts(context, q.message.chat_id)
             try:
                 await q.message.reply_text("", reply_markup=ReplyKeyboardRemove())
             except Exception:
@@ -1828,9 +1687,6 @@ async def v2_handler(update, context):
         return
 
     if act != "scan":
-        # Sécurité anti-doublons : une ancienne invite caméra ne doit jamais
-        # survivre quand on lance une autre action/catégorie.
-        await delete_all_camera_prompts(context, q.message.chat_id)
         try:
             await q.message.reply_text("", reply_markup=ReplyKeyboardRemove())
         except Exception:
@@ -1939,10 +1795,6 @@ async def v2_handler(update, context):
         context.user_data["v2_search"] = sec
         await q.edit_message_text("🔎 Envoie le terme à rechercher.", reply_markup=back_menu()); return
     if act == "scan":
-        # Scanner contextuel : toujours repartir d'une invite caméra propre.
-        # On supprime d'abord toute invite laissée par une ouverture précédente.
-        await delete_all_camera_prompts(context, q.message.chat_id)
-
         # Scanner contextuel : le menu reste cliquable. Le clavier caméra
         # est envoyé comme un message séparé (ReplyKeyboard), car Telegram
         # n'accepte pas ReplyKeyboardMarkup dans editMessageText.
@@ -1956,12 +1808,11 @@ async def v2_handler(update, context):
             "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
             parse_mode=ParseMode.HTML,
         )
-        prompt_msg = await q.message.reply_text(
+        await q.message.reply_text(
             "📷 <b>Scanner prêt</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=context_scanner_keyboard(sec),
         )
-        context.chat_data.setdefault("camera_prompt_message_ids", []).append(prompt_msg.message_id)
         return
 
 
@@ -2432,7 +2283,6 @@ async def v2_text_router(update, context):
     # (ReplyKeyboard), pas des callback queries.
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_context"):
         sec = context.user_data.get("scan_context") or ""
-        await delete_all_camera_prompts(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
@@ -2446,7 +2296,6 @@ async def v2_text_router(update, context):
 
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
         sec = context.user_data.get("v2_section") or ""
-        await delete_all_camera_prompts(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
@@ -2478,7 +2327,43 @@ async def v2_text_router(update, context):
     return False
 
 async def v2_text_wrapper(update,context):
-    if await v2_text_router(update,context): return
+    """Routeur texte prioritaire.
+
+    Les formulaires V2 doivent recevoir les messages texte avant les anciens
+    ConversationHandler stock/fournisseur. Sinon, si un ancien formulaire
+    ConversationHandler est encore actif, il peut intercepter le texte et
+    empêcher un formulaire V2 (commande, livraison, réparation, déblocage,
+    etc.) de passer à l'étape suivante.
+
+    On conserve les anciens flux Stock/Fournisseur en les routant explicitement
+    ici lorsqu'ils utilisent encore leur clé ``step``.
+    """
+    if not update.effective_message or not authorized(update.effective_chat.id):
+        return
+
+    step = context.user_data.get("step")
+
+    stock_steps = {
+        "stock_produit", "stock_reference", "stock_quantite",
+        "stock_prix", "stock_seuil", "stock_emplacement",
+        "stock_fournisseur",
+    }
+    supplier_steps = {
+        "supplier_nom", "supplier_contact", "supplier_phone",
+        "supplier_email",
+    }
+
+    if step in stock_steps:
+        await add_stock_flow(update, context)
+        return
+
+    if step in supplier_steps:
+        await add_supplier(update, context)
+        return
+
+    if await v2_text_router(update,context):
+        return
+
     await search_message(update,context)
 
 def build_app() -> Application:
@@ -2515,15 +2400,22 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("scan", start_scanner))
     app.add_handler(CommandHandler("stopscan", stop_scanner))
     app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(stock_conv)
-    app.add_handler(supplier_conv)
+
+    # IMPORTANT : le routeur texte V2 doit passer AVANT les anciens
+    # ConversationHandler stock/fournisseur. Sinon un ancien état de
+    # ConversationHandler peut intercepter le texte et bloquer les formulaires
+    # Commande/Livraison/Réparation/Déblocage, y compris après un scan caméra.
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, v2_text_wrapper),
+        group=0,
+    )
+
     app.add_handler(CallbackQueryHandler(flow_scan_callback, pattern=r"^flow_scan:"))
     app.add_handler(CallbackQueryHandler(v2_handler, pattern=r"^v2(menu|act):"))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, scanner_webapp))
     # PDF / photos : interceptés avant le routeur texte pour les pièces jointes comptables.
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, compta_receive_attachment))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, v2_text_wrapper))
 
     return app
 
