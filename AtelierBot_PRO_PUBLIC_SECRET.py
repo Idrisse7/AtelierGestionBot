@@ -775,8 +775,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data["scan_mode"] = True
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Retour", callback_data="home")            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-],
+            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="home")],
         ])
         await q.edit_message_text(
             "📷 <b>SCANNER UN APPAREIL</b>\n\n"
@@ -1172,22 +1172,52 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Code non reconnu.")
         return
 
-    # Scanner contextuel depuis un sous-menu : on mémorise le résultat sans
-    # toucher au stock. Le même moteur caméra reste ainsi réutilisé partout.
+    # Depuis un formulaire, le scan remplit directement le champ en cours.
+    # Cela fonctionne aussi avec le bouton WebApp direct (sans passer par le sous-menu Scanner).
     scan_context = context.user_data.get("scan_context")
+    flow = context.user_data.get("v2_flow")
+    step = int(context.user_data.get("v2_step", 1))
+    steps = context.user_data.get("v2_steps", [])
+    form = context.user_data.setdefault("v2_form", {})
+    flow_section = context.user_data.get("v2_section") or FLOW_SECTION_BY_FLOW.get(flow, "")
+
+    if flow and 1 <= step <= len(steps):
+        key, _prompt = steps[step - 1]
+        if key in FLOW_SCAN_FIELDS:
+            form[key] = value
+            context.user_data["v2_step"] = step + 1
+            context.user_data["scan_mode"] = False
+            context.user_data.pop("scan_context", None)
+            context.user_data["last_scan"] = {
+                "value": value, "type": kind, "section": flow_section,
+                "field": key, "date": now_iso(),
+            }
+            if step == len(steps):
+                await _finish_flow(update, context, flow, form)
+            else:
+                next_key, next_prompt = steps[step]
+                await msg.reply_text(
+                    f"✅ <b>{kind} enregistré</b>\\n"
+                    f"🔖 <code>{esc(value)}</code>\\n\\n"
+                    f"{esc(next_prompt)}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=flow_keyboard(flow_section, next_key),
+                )
+            return
+
+    # Hors formulaire, on conserve le comportement contextuel existant.
     if scan_context:
         context.user_data["last_scan"] = {
-            "value": value,
-            "type": kind,
-            "section": scan_context,
-            "date": now_iso(),
+            "value": value, "type": kind, "section": scan_context, "date": now_iso(),
         }
+        context.user_data["scan_mode"] = False
+        context.user_data.pop("scan_context", None)
         await msg.reply_text(
             f"✅ <b>{kind} scanné</b>\\n"
             f"🔖 <code>{esc(value)}</code>\\n"
-            f"📂 Section : <b>{esc(V2_SECTIONS.get(scan_context, (scan_context, []))[0])}</b>\\n\\n"
-            "📷 Tu peux scanner le suivant. Le dernier résultat reste mémorisé.",
+            f"📂 Section : <b>{esc(V2_SECTIONS.get(scan_context, (scan_context, []))[0])}</b>",
             parse_mode=ParseMode.HTML,
+            reply_markup=v2_keyboard(scan_context),
         )
         return
 
@@ -1485,6 +1515,36 @@ def _start_flow(context, flow, steps):
     context.user_data["v2_form"] = {}
 
 
+FLOW_SCAN_FIELDS = {
+    "numero", "commande", "reference", "suivi", "imei", "etiquette",
+}
+
+FLOW_SECTION_BY_FLOW = {
+    "stock_add_v2": "stock",
+    "rupture_add": "ruptures",
+    "commande_add": "commandes",
+    "livraison_add": "livraisons",
+    "movement_in": "mouvements",
+    "movement_out": "mouvements",
+    "reparation": "reparations",
+    "deblocage": "deblocages",
+}
+
+
+def flow_keyboard(section: str, field: str) -> InlineKeyboardMarkup:
+    buttons = []
+    if field in FLOW_SCAN_FIELDS:
+        # Ouverture directe de la caméra : pas d'écran intermédiaire.
+        # Le formulaire en cours reste dans user_data et le scan remplira son champ courant.
+        buttons.append([
+            InlineKeyboardButton("📷 Scanner", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL)),
+            InlineKeyboardButton("⬅️ Retour", callback_data="home"),
+        ])
+    else:
+        buttons.append([InlineKeyboardButton("⬅️ Retour", callback_data="home")])
+    return InlineKeyboardMarkup(buttons)
+
+
 async def v2_handler(update, context):
     q = update.callback_query
     if not q or not await require_access(update):
@@ -1527,6 +1587,7 @@ async def v2_handler(update, context):
 
     if sec == "stock" and act == "add":
         _start_flow(context, "stock_add_v2", [("produit", "1/7 — Nom du produit/modèle ?"), ("reference", "2/7 — Référence interne ?"), ("quantite", "3/7 — Quantité ?"), ("prix_achat", "4/7 — Prix d'achat unitaire ?"), ("seuil", "5/7 — Seuil d'alerte ?"), ("emplacement", "6/7 — Emplacement ?"), ("fournisseur", "7/7 — Fournisseur ?")])
+        context.user_data["v2_section"] = "stock"
         await q.edit_message_text("➕ <b>AJOUT STOCK</b>\n\n1/7 — Nom du produit/modèle ?", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
 
     if sec == "stock" and act == "inventory":
@@ -1553,6 +1614,7 @@ async def v2_handler(update, context):
 
     if sec == "ruptures" and act == "add":
         _start_flow(context, "rupture_add", [("reference", "Envoie la référence du produit à mettre en rupture.")])
+        context.user_data["v2_section"] = "ruptures"
         await q.edit_message_text(
             "➕ <b>AJOUTER UNE RUPTURE</b>\n\n"
             "Envoie la <b>référence exacte</b> du produit existant.\n"
@@ -1591,7 +1653,11 @@ async def v2_handler(update, context):
     if spec:
         flow, steps, prompt = spec
         _start_flow(context, flow, steps)
-        await q.edit_message_text(prompt, parse_mode=ParseMode.HTML, reply_markup=back_menu()); return
+        context.user_data["v2_section"] = sec
+        await q.edit_message_text(
+            prompt, parse_mode=ParseMode.HTML,
+            reply_markup=flow_keyboard(sec, steps[0][0])
+        ); return
 
     if act == "list":
         await q.edit_message_text(v2_text(sec, current_chat_id=update.effective_chat.id), reply_markup=v2_keyboard(sec), parse_mode=ParseMode.HTML); return
@@ -1604,18 +1670,28 @@ async def v2_handler(update, context):
         # conservé dans user_data["last_scan"] pour l'utiliser dans la saisie en cours.
         context.user_data["scan_mode"] = True
         context.user_data["scan_context"] = sec
+        flow = context.user_data.get("v2_flow")
+        step = int(context.user_data.get("v2_step", 1))
+        steps = context.user_data.get("v2_steps", [])
+        current_field = steps[step - 1][0] if flow and 1 <= step <= len(steps) else None
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Retour", callback_data=f"v2menu:{sec}")            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
-],
+            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+            [InlineKeyboardButton("⬅️ Retour", callback_data=f"v2menu:{sec}")],
         ])
-        await q.edit_message_text(
-            f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\\n\\n"
-            "Scanne un IMEI, un QR code ou un code-barres.\\n"
-            "Le résultat sera renvoyé ici et mémorisé pour cette section.\\n\\n"
-            "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=keyboard,
-        )
+        if flow and current_field in FLOW_SCAN_FIELDS:
+            intro = (
+                f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\n\n"
+                "Le scan remplira automatiquement le <b>champ en cours</b> puis passera à l'étape suivante.\n\n"
+                "Tu peux fermer la caméra après le scan : le bot reprend directement la saisie."
+            )
+        else:
+            intro = (
+                f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\n\n"
+                "Scanne un IMEI, un QR code ou un code-barres.\n"
+                "Le résultat sera mémorisé pour cette section.\n\n"
+                "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement."
+            )
+        await q.edit_message_text(intro, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         return
 
     if sec == "mouvements" and act == "list":
@@ -2093,7 +2169,12 @@ async def v2_text_router(update, context):
             if step == len(steps):
                 await _finish_flow(update,context,flow,f)
             else:
-                await update.effective_message.reply_text(steps[step][1], parse_mode=ParseMode.HTML, reply_markup=back_menu())
+                section = context.user_data.get("v2_section", "")
+                next_key = steps[step][0]
+                await update.effective_message.reply_text(
+                    steps[step][1], parse_mode=ParseMode.HTML,
+                    reply_markup=flow_keyboard(section, next_key) if section else back_menu()
+                )
             return True
     return False
 
@@ -2473,6 +2554,7 @@ async def compta_handle_callback(update, context):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬇️ Récupérer les fichiers enregistrés", callback_data="compta:attachments")],
                 [InlineKeyboardButton("⬅️ Retour comptabilité", callback_data="compta:menu")]
+                [InlineKeyboardButton("📷 Scanner", callback_data="scan_device")],
             ]),
             parse_mode="HTML")
     elif action == "attachments":
@@ -2490,8 +2572,7 @@ async def compta_handle_callback(update, context):
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📎 Pièces jointes enregistrées", callback_data="compta:attachments")],
-                [InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{ {'invoice':'invoices','credit':'credits','payment':'payments','expense':'expenses','bank':'bank'}.get(kind,'menu')                [InlineKeyboardButton("📷 Scanner", callback_data="scan_device")],
-}")]
+                [InlineKeyboardButton("⬅️ Retour", callback_data=f"compta:{ {'invoice':'invoices','credit':'credits','payment':'payments','expense':'expenses','bank':'bank'}.get(kind,'menu')}")]
             ])
         )
     elif action.startswith("download_attachment:"):
