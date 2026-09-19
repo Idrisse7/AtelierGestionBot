@@ -1276,6 +1276,10 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # toucher au stock. Le même moteur caméra reste ainsi réutilisé partout.
     scan_context = context.user_data.get("scan_context")
     if scan_context:
+        # Le message caméra utilisé pour ce scan est terminé : on le retire
+        # avant d'afficher le résultat afin d'éviter les doublons au retour.
+        await delete_all_camera_prompts(context, msg.chat_id)
+
         context.user_data["last_scan"] = {
             "value": value,
             "type": kind,
@@ -1780,6 +1784,9 @@ async def v2_handler(update, context):
     if data.startswith("v2menu:"):
         sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
+            # Retour depuis un formulaire/scanner : aucune ancienne invite caméra
+            # ne doit rester dans le chat.
+            await delete_all_camera_prompts(context, q.message.chat_id)
             try:
                 await q.message.reply_text("", reply_markup=ReplyKeyboardRemove())
             except Exception:
@@ -1796,6 +1803,9 @@ async def v2_handler(update, context):
         return
 
     if act != "scan":
+        # Sécurité anti-doublons : une ancienne invite caméra ne doit jamais
+        # survivre quand on lance une autre action/catégorie.
+        await delete_all_camera_prompts(context, q.message.chat_id)
         try:
             await q.message.reply_text("", reply_markup=ReplyKeyboardRemove())
         except Exception:
@@ -1904,6 +1914,10 @@ async def v2_handler(update, context):
         context.user_data["v2_search"] = sec
         await q.edit_message_text("🔎 Envoie le terme à rechercher.", reply_markup=back_menu()); return
     if act == "scan":
+        # Scanner contextuel : toujours repartir d'une invite caméra propre.
+        # On supprime d'abord toute invite laissée par une ouverture précédente.
+        await delete_all_camera_prompts(context, q.message.chat_id)
+
         # Scanner contextuel : le menu reste cliquable. Le clavier caméra
         # est envoyé comme un message séparé (ReplyKeyboard), car Telegram
         # n'accepte pas ReplyKeyboardMarkup dans editMessageText.
