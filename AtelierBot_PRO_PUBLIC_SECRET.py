@@ -1479,6 +1479,7 @@ async def v2_handler(update, context):
         context.user_data["inventory_items"] = [str(x.get("reference", "")) for x in items]
         context.user_data["inventory_index"] = 0
         context.user_data["inventory_corrections"] = []
+        context.user_data["inventory_results"] = []
         ref = context.user_data["inventory_items"][0]
         item = next((x for x in items if str(x.get("reference", "")) == ref), None)
         theoretical = int(item.get("quantite", 0)) if item else 0
@@ -1688,61 +1689,146 @@ async def v2_text_router(update, context):
         idx = int(context.user_data.get("inventory_index", 0))
         if idx >= len(items_refs):
             return True
+
         try:
             counted = _safe_int(txt)
             if counted < 0:
                 raise ValueError
         except ValueError:
-            await update.effective_message.reply_text("❌ Envoie uniquement une quantité entière positive ou 0.", reply_markup=back_menu())
-            return True
-
-        ref = items_refs[idx]
-        item = next((x for x in DB.get("stock", []) if str(x.get("reference", "")) == ref), None)
-        if item is None:
-            await update.effective_message.reply_text("❌ Référence introuvable pendant l'inventaire.", reply_markup=back_menu())
-            context.user_data.clear()
-            return True
-        old = int(item.get("quantite", 0))
-        if old != counted:
-            item["quantite"] = counted
-            item["updated_at"] = now_iso()
-            DB.setdefault("mouvements", []).append({
-                "date": now_iso(), "reference": ref, "type": "INVENTAIRE",
-                "quantite": counted - old, "avant": old, "apres": counted,
-                "chat_id": update.effective_chat.id
-            })
-            context.user_data.setdefault("inventory_corrections", []).append((ref, old, counted))
-            log_activity(update.effective_chat.id, "INVENTAIRE_CORRECTION", f"{ref}: {old} -> {counted}")
-
-        idx += 1
-        context.user_data["inventory_index"] = idx
-        if idx < len(items_refs):
-            next_ref = items_refs[idx]
-            next_item = next((x for x in DB.get("stock", []) if str(x.get("reference", "")) == next_ref), None)
-            theoretical = int(next_item.get("quantite", 0)) if next_item else 0
             await update.effective_message.reply_text(
-                f"📋 <b>INVENTAIRE</b>\n\n{idx+1}/{len(items_refs)} — <b>{esc(next_item.get('produit', next_ref) if next_item else next_ref)}</b>\n"
-                f"🔖 Réf. : <code>{esc(next_ref)}</code>\n"
-                f"📦 Stock théorique : <b>{theoretical}</b>\n\n"
-                "Envoie la quantité réellement comptée.",
-                parse_mode=ParseMode.HTML, reply_markup=back_menu()
+                "❌ Envoie uniquement une quantité entière positive ou 0.",
+                reply_markup=back_menu(),
             )
             return True
 
-        corrections = context.user_data.get("inventory_corrections", [])
+        ref = items_refs[idx]
+        item = next(
+            (x for x in DB.get("stock", []) if str(x.get("reference", "")) == ref),
+            None,
+        )
+        if item is None:
+            await update.effective_message.reply_text(
+                "❌ Référence introuvable pendant l'inventaire.",
+                reply_markup=back_menu(),
+            )
+            context.user_data.clear()
+            return True
+
+        theoretical = int(item.get("quantite", 0))
+        ecart = counted - theoretical
+
+        # On conserve le détail de chaque référence contrôlée.
+        result = {
+            "reference": ref,
+            "produit": str(item.get("produit", ref)),
+            "theorique": theoretical,
+            "compte": counted,
+            "ecart": ecart,
+        }
+        context.user_data.setdefault("inventory_results", []).append(result)
+
+        if theoretical != counted:
+            item["quantite"] = counted
+            item["updated_at"] = now_iso()
+
+            DB.setdefault("mouvements", []).append(
+                {
+                    "date": now_iso(),
+                    "reference": ref,
+                    "type": "INVENTAIRE",
+                    "quantite": ecart,
+                    "avant": theoretical,
+                    "apres": counted,
+                    "chat_id": update.effective_chat.id,
+                }
+            )
+
+            context.user_data.setdefault("inventory_corrections", []).append(result)
+            log_activity(
+                update.effective_chat.id,
+                "INVENTAIRE_CORRECTION",
+                f"{ref}: {theoretical} -> {counted} (écart {ecart:+d})",
+            )
+
+        # Affiche immédiatement l'écart de la référence qui vient d'être comptée.
+        ecart_label = "Aucun écart" if ecart == 0 else f"{ecart:+d}"
+        ecart_icon = "✅" if ecart == 0 else "⚠️"
+
+        idx += 1
+        context.user_data["inventory_index"] = idx
+
+        if idx < len(items_refs):
+            next_ref = items_refs[idx]
+            next_item = next(
+                (
+                    x
+                    for x in DB.get("stock", [])
+                    if str(x.get("reference", "")) == next_ref
+                ),
+                None,
+            )
+            next_theoretical = (
+                int(next_item.get("quantite", 0)) if next_item else 0
+            )
+
+            await update.effective_message.reply_text(
+                f"📱 <b>{esc(item.get('produit', ref))}</b>\n"
+                f"🔖 Réf. : <code>{esc(ref)}</code>\n"
+                f"📦 Théorique : <b>{theoretical}</b>\n"
+                f"📋 Compté : <b>{counted}</b>\n"
+                f"{ecart_icon} Écart : <b>{esc(ecart_label)}</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 <b>INVENTAIRE</b> — {idx + 1}/{len(items_refs)}\n\n"
+                f"📱 <b>{esc(next_item.get('produit', next_ref) if next_item else next_ref)}</b>\n"
+                f"🔖 Réf. : <code>{esc(next_ref)}</code>\n"
+                f"📦 Stock théorique : <b>{next_theoretical}</b>\n\n"
+                "Envoie la quantité réellement comptée.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=back_menu(),
+            )
+            return True
+
+        # Fin : sauvegarde persistante et recalcul complet à partir du stock final.
+        results = context.user_data.get("inventory_results", [])
+        corrections = [x for x in results if int(x["ecart"]) != 0]
+        positive = sum(int(x["ecart"]) for x in results if int(x["ecart"]) > 0)
+        negative = sum(abs(int(x["ecart"])) for x in results if int(x["ecart"]) < 0)
+
+        # Les indicateurs sont recalculés depuis les quantités réellement enregistrées.
+        stock = DB.get("stock", [])
+        total_units = sum(int(x.get("quantite", 0)) for x in stock)
+        low = sum(
+            1
+            for x in stock
+            if 0 < int(x.get("quantite", 0))
+            <= int(x.get("seuil", DB["settings"]["low_stock_default"]))
+        )
+        ruptures = sum(1 for x in stock if int(x.get("quantite", 0)) <= 0)
+        stock_value = sum(
+            int(x.get("quantite", 0)) * float(x.get("prix_achat", 0))
+            for x in stock
+        )
+
+        # Une seule sauvegarde à la fin de l'inventaire : les corrections
+        # survivent au redémarrage exactement comme les autres données.
         save_db(DB)
+
         context.user_data.clear()
-        total = sum(int(x.get("quantite", 0)) for x in DB.get("stock", []))
-        low = sum(1 for x in DB.get("stock", []) if 0 < int(x.get("quantite", 0)) <= int(x.get("seuil", DB["settings"]["low_stock_default"])))
-        out = sum(1 for x in DB.get("stock", []) if int(x.get("quantite", 0)) <= 0)
+
         await update.effective_message.reply_text(
             "📋 <b>INVENTAIRE TERMINÉ</b>\n\n"
-            f"📦 Références vérifiées : <b>{len(items_refs)}</b>\n"
+            f"📋 Références vérifiées : <b>{len(results)}</b>\n"
             f"✏️ Corrections : <b>{len(corrections)}</b>\n"
-            f"📦 Stock final : <b>{total}</b> unités\n"
+            f"➕ Écarts positifs : <b>{positive}</b>\n"
+            f"➖ Écarts négatifs : <b>{negative}</b>\n\n"
+            f"📦 Stock final : <b>{total_units}</b> unités\n"
+            f"🟢 Références : <b>{len(stock)}</b>\n"
             f"🟠 Stocks faibles : <b>{low}</b>\n"
-            f"🔴 Ruptures : <b>{out}</b>",
-            parse_mode=ParseMode.HTML, reply_markup=menu()
+            f"🔴 Ruptures : <b>{ruptures}</b>\n"
+            f"💰 Valeur d'achat du stock : <b>{money(stock_value)}</b>\n\n"
+            "✅ Les corrections ont été enregistrées dans la base persistante.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=menu(),
         )
         return True
 
