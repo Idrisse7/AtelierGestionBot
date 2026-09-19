@@ -1172,6 +1172,25 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Code non reconnu.")
         return
 
+    # Scanner contextuel depuis un sous-menu : on mémorise le résultat sans
+    # toucher au stock. Le même moteur caméra reste ainsi réutilisé partout.
+    scan_context = context.user_data.get("scan_context")
+    if scan_context:
+        context.user_data["last_scan"] = {
+            "value": value,
+            "type": kind,
+            "section": scan_context,
+            "date": now_iso(),
+        }
+        await msg.reply_text(
+            f"✅ <b>{kind} scanné</b>\\n"
+            f"🔖 <code>{esc(value)}</code>\\n"
+            f"📂 Section : <b>{esc(V2_SECTIONS.get(scan_context, (scan_context, []))[0])}</b>\\n\\n"
+            "📷 Tu peux scanner le suivant. Le dernier résultat reste mémorisé.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     # Si aucune référence n'est fournie, on tente la reconnaissance automatique.
     if not ref:
         ref = find_reference_from_code(value)
@@ -1395,14 +1414,14 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 V2_SECTIONS = {
- "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete")]),
- "ruptures": ("🚨 RUPTURES", [("➕ Ajouter", "v2act:ruptures:add"), ("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search"), ("↩️ Annuler la rupture", "v2act:ruptures:cancel")]),
- "commandes": ("📋 COMMANDES", [("➕ Ajouter", "v2act:commandes:add"), ("📋 Voir", "v2act:commandes:list"), ("🔎 Rechercher", "v2act:commandes:search"), ("✏️ Modifier", "v2act:commandes:edit"), ("🗑️ Supprimer", "v2act:commandes:delete")]),
- "livraisons": ("🚚 LIVRAISONS", [("➕ Ajouter", "v2act:livraisons:add"), ("📋 Voir", "v2act:livraisons:list"), ("🔎 Rechercher", "v2act:livraisons:search"), ("✏️ Modifier", "v2act:livraisons:edit"), ("🗑️ Supprimer", "v2act:livraisons:delete")]),
- "reparations": ("🔧 RÉPARATIONS", [("➕ Ajouter une réparation", "v2act:reparations:add"), ("📋 Voir", "v2act:reparations:list"), ("🔎 Rechercher", "v2act:reparations:search"), ("✏️ Modifier", "v2act:reparations:edit"), ("🗑️ Supprimer", "v2act:reparations:delete"), ("⏸️ Pause", "v2act:reparations:pause"), ("▶️ Reprendre", "v2act:reparations:resume"), ("📦 Attente pièce", "v2act:reparations:parts"), ("👤 Attente client", "v2act:reparations:customer"), ("🧪 À tester", "v2act:reparations:test"), ("✅ Terminer", "v2act:reparations:done"), ("📦 Livrée", "v2act:reparations:delivered"), ("❌ Annuler", "v2act:reparations:cancel")]),
- "deblocages": ("🔓 DÉBLOCAGES", [("➕ Nouveau dossier", "v2act:deblocages:add"), ("📋 Voir", "v2act:deblocages:list"), ("🔎 Rechercher", "v2act:deblocages:search"), ("✏️ Modifier", "v2act:deblocages:edit"), ("🗑️ Supprimer", "v2act:deblocages:delete"), ("❌ Annuler", "v2act:deblocages:cancel")]),
- "fournisseurs": ("🏢 FOURNISSEURS", [("➕ Ajouter", "v2act:fournisseurs:add"), ("📋 Voir", "v2act:fournisseurs:list"), ("🔎 Rechercher", "v2act:fournisseurs:search"), ("✏️ Modifier", "v2act:fournisseurs:edit"), ("🗑️ Supprimer", "v2act:fournisseurs:delete")]),
- "mouvements": ("📥📤 MOUVEMENTS", [("📥 Entrée", "v2act:mouvements:in"), ("📤 Sortie", "v2act:mouvements:out"), ("📋 Historique", "v2act:mouvements:list")]),
+ "stock": ("📦 STOCK", [("➕ Ajouter", "v2act:stock:add"), ("📋 Voir", "v2act:stock:list"), ("🔎 Rechercher", "v2act:stock:search"), ("✏️ Modifier", "v2act:stock:edit"), ("🗑️ Supprimer", "v2act:stock:delete"), ("📷 Scanner", "v2act:stock:scan")]),
+ "ruptures": ("🚨 RUPTURES", [("➕ Ajouter", "v2act:ruptures:add"), ("📋 Voir", "v2act:ruptures:list"), ("🔎 Rechercher", "v2act:ruptures:search"), ("↩️ Annuler la rupture", "v2act:ruptures:cancel"), ("📷 Scanner", "v2act:ruptures:scan")]),
+ "commandes": ("📋 COMMANDES", [("➕ Ajouter", "v2act:commandes:add"), ("📋 Voir", "v2act:commandes:list"), ("🔎 Rechercher", "v2act:commandes:search"), ("✏️ Modifier", "v2act:commandes:edit"), ("🗑️ Supprimer", "v2act:commandes:delete"), ("📷 Scanner", "v2act:commandes:scan")]),
+ "livraisons": ("🚚 LIVRAISONS", [("➕ Ajouter", "v2act:livraisons:add"), ("📋 Voir", "v2act:livraisons:list"), ("🔎 Rechercher", "v2act:livraisons:search"), ("✏️ Modifier", "v2act:livraisons:edit"), ("🗑️ Supprimer", "v2act:livraisons:delete"), ("📷 Scanner", "v2act:livraisons:scan")]),
+ "reparations": ("🔧 RÉPARATIONS", [("➕ Ajouter une réparation", "v2act:reparations:add"), ("📋 Voir", "v2act:reparations:list"), ("🔎 Rechercher", "v2act:reparations:search"), ("✏️ Modifier", "v2act:reparations:edit"), ("🗑️ Supprimer", "v2act:reparations:delete"), ("⏸️ Pause", "v2act:reparations:pause"), ("▶️ Reprendre", "v2act:reparations:resume"), ("📦 Attente pièce", "v2act:reparations:parts"), ("👤 Attente client", "v2act:reparations:customer"), ("🧪 À tester", "v2act:reparations:test"), ("✅ Terminer", "v2act:reparations:done"), ("📦 Livrée", "v2act:reparations:delivered"), ("❌ Annuler", "v2act:reparations:cancel"), ("📷 Scanner", "v2act:reparations:scan")]),
+ "deblocages": ("🔓 DÉBLOCAGES", [("➕ Nouveau dossier", "v2act:deblocages:add"), ("📋 Voir", "v2act:deblocages:list"), ("🔎 Rechercher", "v2act:deblocages:search"), ("✏️ Modifier", "v2act:deblocages:edit"), ("🗑️ Supprimer", "v2act:deblocages:delete"), ("❌ Annuler", "v2act:deblocages:cancel"), ("📷 Scanner", "v2act:deblocages:scan")]),
+ "fournisseurs": ("🏢 FOURNISSEURS", [("➕ Ajouter", "v2act:fournisseurs:add"), ("📋 Voir", "v2act:fournisseurs:list"), ("🔎 Rechercher", "v2act:fournisseurs:search"), ("✏️ Modifier", "v2act:fournisseurs:edit"), ("🗑️ Supprimer", "v2act:fournisseurs:delete"), ("📷 Scanner", "v2act:fournisseurs:scan")]),
+ "mouvements": ("📥📤 MOUVEMENTS", [("📥 Entrée", "v2act:mouvements:in"), ("📤 Sortie", "v2act:mouvements:out"), ("📋 Historique", "v2act:mouvements:list"), ("📷 Scanner", "v2act:mouvements:scan")]),
  "collaborateurs": ("👥 COLLABORATEURS", [("➕ Ajouter", "v2act:collaborateurs:add"), ("📋 Voir", "v2act:collaborateurs:list"), ("🗑️ Révoquer", "v2act:collaborateurs:delete"), ("🛡️ Gérer les rôles", "v2act:collaborateurs:roles")]),
 }
 V2_STATUSES = ["EN ATTENTE", "EN COURS", "EN PAUSE", "EN ATTENTE PIÈCE", "EN ATTENTE CLIENT", "À TESTER", "TERMINÉE", "LIVRÉE", "ANNULÉE"]
@@ -1579,6 +1598,26 @@ async def v2_handler(update, context):
     if act == "search":
         context.user_data["v2_search"] = sec
         await q.edit_message_text("🔎 Envoie le terme à rechercher.", reply_markup=back_menu()); return
+    if act == "scan":
+        # Scanner contextuel : il utilise la même WebApp caméra que le scanner principal,
+        # mais n'ajoute pas automatiquement un appareil au stock. Le résultat est
+        # conservé dans user_data["last_scan"] pour l'utiliser dans la saisie en cours.
+        context.user_data["scan_mode"] = True
+        context.user_data["scan_context"] = sec
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+            [InlineKeyboardButton("⬅️ Retour", callback_data=f"v2menu:{sec}")],
+        ])
+        await q.edit_message_text(
+            f"📷 <b>SCANNER — {esc(V2_SECTIONS[sec][0])}</b>\\n\\n"
+            "Scanne un IMEI, un QR code ou un code-barres.\\n"
+            "Le résultat sera renvoyé ici et mémorisé pour cette section.\\n\\n"
+            "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+        )
+        return
+
     if sec == "mouvements" and act == "list":
         await q.edit_message_text(v2_text("mouvements", current_chat_id=update.effective_chat.id), reply_markup=v2_keyboard("mouvements"), parse_mode=ParseMode.HTML); return
     if sec == "reparations" and act in {"pause", "resume", "parts", "customer", "test", "done", "delivered", "cancel"}:
