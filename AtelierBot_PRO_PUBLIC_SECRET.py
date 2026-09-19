@@ -1149,23 +1149,126 @@ async def start_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Réception des données de la WebApp caméra.
+
+    IMPORTANT :
+    - En mode formulaire, le champ courant est la source de vérité.
+    - La WebApp peut envoyer soit un JSON complet, soit simplement la valeur
+      scannée. Dans les deux cas on enregistre la valeur puis on avance d'une
+      étape.
+    - Un numéro de commande/suivi/référence de 15 chiffres n'est PAS considéré
+      comme un IMEI sauf si le champ courant est réellement ``imei``.
+    """
     if not authorized(update.effective_chat.id):
         return
+
     msg = update.effective_message
     if not msg or not msg.web_app_data:
         return
 
+    raw = str(msg.web_app_data.data or "").strip()
+    payload: dict[str, Any] = {}
+
+    # La caméra historique envoie du JSON, mais certaines versions de la page
+    # ont envoyé directement la valeur. On accepte les deux formats.
     try:
-        payload = json.loads(msg.web_app_data.data)
+        decoded = json.loads(raw)
+        if isinstance(decoded, dict):
+            payload = decoded
+        elif isinstance(decoded, str):
+            payload = {"value": decoded}
+        else:
+            payload = {"value": raw}
     except (json.JSONDecodeError, TypeError):
-        await msg.reply_text("❌ Données de scan invalides.")
+        payload = {"value": raw}
+
+    # Compatibilité avec plusieurs noms de propriétés possibles de la page caméra.
+    value = ""
+    for key in ("value", "code", "result", "text", "scan", "scanned", "data"):
+        candidate = payload.get(key)
+        if candidate is not None and not isinstance(candidate, (dict, list)):
+            value = str(candidate).strip()
+            if value:
+                break
+    value = value.replace(" ", "")
+
+    flow = context.user_data.get("v2_flow")
+    steps = context.user_data.get("v2_steps", [])
+    step = int(context.user_data.get("v2_step", 1) or 1)
+    form = context.user_data.setdefault("v2_form", {}) if flow else {}
+
+    # ============================================================
+    # MODE FORMULAIRE : on traite d'abord le champ courant.
+    # Cela évite notamment qu'un numéro de commande/suivi de 15 chiffres
+    # soit pris à tort pour un IMEI.
+    # ============================================================
+    if flow:
+        current_field = steps[step - 1][0] if 0 < step <= len(steps) else ""
+        expected_section = context.user_data.get("v2_section") or FLOW_SECTIONS.get(flow, "")
+        flow_field = str(payload.get("field", "")).strip() or current_field
+        flow_section = str(payload.get("section", "")).strip() or expected_section
+
+        if flow_field != current_field:
+            await msg.reply_text("⚠️ Ce scanner ne correspond plus à l'étape en cours.")
+            return
+        if flow_section and expected_section and flow_section != expected_section:
+            await msg.reply_text("⚠️ Contexte de scan invalide.")
+            return
+        if flow_field not in FLOW_SCAN_FIELDS.get(flow, set()):
+            await msg.reply_text("⚠️ Ce champ n'accepte pas le scan caméra.")
+            return
+
+        if not value or len(value) > 120:
+            await msg.reply_text("❌ Valeur scannée invalide.")
+            return
+
+        # Seul un champ explicitement nommé IMEI impose Luhn + 15 chiffres.
+        if flow_field == "imei":
+            if not (value.isdigit() and len(value) == 15 and valid_imei(value)):
+                await msg.reply_text("❌ IMEI invalide (15 chiffres + contrôle Luhn).")
+                return
+
+        if flow_field in {"numero", "commande", "suivi", "reference", "etiquette"}:
+            if not re.search(r"[A-Za-z0-9]", value):
+                await msg.reply_text("❌ Numéro scanné invalide.")
+                return
+
+        form[flow_field] = value
+        context.user_data["v2_step"] = step + 1
+
+        # Supprime l'ancien message qui portait le clavier caméra pour éviter
+        # l'accumulation de "Caméra prête" à chaque ouverture.
+        prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+        if prompt_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=int(prompt_id),
+                )
+            except Exception:
+                pass
+
+        await msg.reply_text("", reply_markup=ReplyKeyboardRemove())
+
+        if step == len(steps):
+            await _finish_flow(update, context, flow, form)
+            return
+
+        next_key, next_prompt = steps[step]
+        next_markup = flow_keyboard(flow, next_key, expected_section)
+        await msg.reply_text(
+            f"✅ <b>{esc(flow_field)}</b> récupéré : <code>{esc(value)}</code>\n\n"
+            + next_prompt,
+            parse_mode=ParseMode.HTML,
+            reply_markup=next_markup,
+        )
         return
 
-    ref = str(payload.get("reference", "")).strip()
-    value = str(payload.get("value", "")).strip().replace(" ", "")
+    # ============================================================
+    # MODE SCANNER CONTEXTUEL / STOCK
+    # Ici seulement, on détermine le type IMEI / QR / code-barres.
+    # ============================================================
     kind_hint = str(payload.get("type", "")).upper()
-
-    # Détermine le type du code.
     is_imei = value.isdigit() and len(value) == 15
     if is_imei:
         if not valid_imei(value):
@@ -1178,72 +1281,20 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Code non reconnu.")
         return
 
-    # Mode formulaire : le scan remplit LE CHAMP COURANT du formulaire,
-    # sans demander de référence stock. Le bot passe ensuite automatiquement
-    # à l'étape suivante et réaffiche le bouton Scanner si nécessaire.
-    flow = context.user_data.get("v2_flow")
-    flow_field = str(payload.get("field", "")).strip()
-    flow_section = str(payload.get("section", "")).strip()
-    if flow:
-        steps = context.user_data.get("v2_steps", [])
-        step = context.user_data.get("v2_step", 1)
-        form = context.user_data.setdefault("v2_form", {})
-        current_field = steps[step - 1][0] if 0 < step <= len(steps) else ""
-        expected_section = context.user_data.get("v2_section") or FLOW_SECTIONS.get(flow, "")
-
-        if not flow_field or flow_field != current_field:
-            await msg.reply_text("⚠️ Ce scanner ne correspond plus à l'étape en cours.")
-            return
-        if flow_section and expected_section and flow_section != expected_section:
-            await msg.reply_text("⚠️ Contexte de scan invalide.")
-            return
-        if flow_field not in FLOW_SCAN_FIELDS.get(flow, set()):
-            await msg.reply_text("⚠️ Ce champ n'accepte pas le scan caméra.")
-            return
-
-        # Pour un champ IMEI, on exige un IMEI valide. Pour les autres champs,
-        # on accepte le contenu renvoyé par un QR/code-barres (y compris les
-        # numéros de suivi contenant tirets ou autres séparateurs).
-        if flow_field == "imei":
-            if not (value.isdigit() and len(value) == 15 and valid_imei(value)):
-                await msg.reply_text("❌ IMEI invalide (15 chiffres + contrôle Luhn).")
-                return
-        elif not value or len(value) > 120:
-            await msg.reply_text("❌ Valeur scannée invalide.")
-            return
-
-        if flow_field in {"numero", "commande", "suivi", "reference", "etiquette"}:
-            # Protection légère contre un scan vide/absurde sans bloquer les
-            # formats réels de numéros de commande, colis et étiquettes.
-            if not re.search(r"[A-Za-z0-9]", value):
-                await msg.reply_text("❌ Numéro scanné invalide.")
-                return
-
-        form[flow_field] = value
-        context.user_data["v2_step"] = step + 1
-
-        # Le clavier ReplyKeyboard qui a servi à ouvrir la caméra est
-        # toujours retiré après un scan. Le prochain champ utilise son propre
-        # bouton inline "📷 Scanner", avec son URL/field exact.
-        await msg.reply_text("", reply_markup=ReplyKeyboardRemove())
-
-        if step == len(steps):
-            await _finish_flow(update, context, flow, form)
-            return
-
-        next_key, next_prompt = steps[step]
-        section = expected_section
-        next_markup = flow_keyboard(flow, next_key, section)
-        await msg.reply_text(
-            f"✅ <b>{esc(flow_field)}</b> récupéré : <code>{esc(value)}</code>\n\n"
-            + next_prompt,
-            parse_mode=ParseMode.HTML,
-            reply_markup=next_markup,
-        )
-        return
+    # Nettoyage du message/clavier de la caméra après réception.
+    prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+    if prompt_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=int(prompt_id),
+            )
+        except Exception:
+            pass
+    await msg.reply_text("", reply_markup=ReplyKeyboardRemove())
 
     # Scanner contextuel depuis un sous-menu : on mémorise le résultat sans
-    # toucher au stock. Le même moteur caméra reste ainsi réutilisé partout.
+    # toucher au stock.
     scan_context = context.user_data.get("scan_context")
     if scan_context:
         context.user_data["last_scan"] = {
@@ -1253,15 +1304,16 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "date": now_iso(),
         }
         await msg.reply_text(
-            f"✅ <b>{kind} scanné</b>\\n"
-            f"🔖 <code>{esc(value)}</code>\\n"
-            f"📂 Section : <b>{esc(V2_SECTIONS.get(scan_context, (scan_context, []))[0])}</b>\\n\\n"
+            f"✅ <b>{kind} scanné</b>\n"
+            f"🔖 <code>{esc(value)}</code>\n"
+            f"📂 Section : <b>{esc(V2_SECTIONS.get(scan_context, (scan_context, []))[0])}</b>\n\n"
             "📷 Tu peux scanner le suivant. Le dernier résultat reste mémorisé.",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    # Si aucune référence n'est fournie, on tente la reconnaissance automatique.
+    # Scanner stock historique.
+    ref = str(payload.get("reference", "")).strip()
     if not ref:
         ref = find_reference_from_code(value)
         if not ref:
@@ -1271,11 +1323,6 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "puis scanne ce code."
             )
             return
-        await msg.reply_text(
-            f"🔎 Code reconnu automatiquement.\n"
-            f"📦 Réf. <code>{esc(ref)}</code>",
-            parse_mode=ParseMode.HTML,
-        )
 
     item = next((x for x in DB["stock"] if str(x.get("reference")) == ref), None)
     if not item:
@@ -1285,9 +1332,6 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Pour les codes-barres/QR, mémorise l'association référence <-> code.
-    # Un IMEI reste un identifiant unique d'appareil et n'est pas utilisé
-    # comme modèle permanent de référence.
     if kind in {"QR", "CODE_BARRES"}:
         existing = find_reference_from_code(value)
         if existing and existing != ref:
@@ -1621,7 +1665,7 @@ def _start_flow(context, flow, steps, section=None):
 
 
 async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ouvre la caméra d'un champ de formulaire sans remplacer le clavier inline."""
+    """Ouvre la caméra du champ courant et évite les anciens prompts empilés."""
     q = update.callback_query
     if not q or not await require_access(update):
         return
@@ -1646,9 +1690,19 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{SCANNER_WEBAPP_URL}?mode=flow"
         f"&section={section}&field={field}"
     )
-    # ReplyKeyboard séparé : c'est ce mécanisme qui permet à sendData()
-    # de remonter les données au bot sous StatusUpdate.WEB_APP_DATA.
-    await q.message.reply_text(
+
+    # Si une ancienne fenêtre/message caméra est encore présent, on le supprime.
+    old_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+    if old_prompt_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=update.effective_chat.id,
+                message_id=int(old_prompt_id),
+            )
+        except Exception:
+            pass
+
+    prompt = await q.message.reply_text(
         "📷 <b>Caméra prête</b>\n"
         "Scanne maintenant le QR/code-barres puis ferme la caméra.",
         parse_mode=ParseMode.HTML,
@@ -1660,6 +1714,7 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_persistent=False,
         ),
     )
+    context.user_data["camera_prompt_message_id"] = prompt.message_id
 
 
 async def v2_handler(update, context):
@@ -1808,11 +1863,12 @@ async def v2_handler(update, context):
             "ℹ️ Ce mode contextuel ne modifie pas le stock automatiquement.",
             parse_mode=ParseMode.HTML,
         )
-        await q.message.reply_text(
+        prompt = await q.message.reply_text(
             "📷 <b>Scanner prêt</b>",
             parse_mode=ParseMode.HTML,
             reply_markup=context_scanner_keyboard(sec),
         )
+        context.user_data["camera_prompt_message_id"] = prompt.message_id
         return
 
 
@@ -2283,12 +2339,24 @@ async def v2_text_router(update, context):
     # (ReplyKeyboard), pas des callback queries.
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_context"):
         sec = context.user_data.get("scan_context") or ""
+        prompt_id = context.user_data.get("camera_prompt_message_id")
+        if prompt_id:
+            try:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=int(prompt_id))
+            except Exception:
+                pass
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
         return True
 
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_mode") and not context.user_data.get("v2_flow"):
+        prompt_id = context.user_data.get("camera_prompt_message_id")
+        if prompt_id:
+            try:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=int(prompt_id))
+            except Exception:
+                pass
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Menu principal :", reply_markup=menu())
@@ -2296,6 +2364,12 @@ async def v2_text_router(update, context):
 
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
         sec = context.user_data.get("v2_section") or ""
+        prompt_id = context.user_data.get("camera_prompt_message_id")
+        if prompt_id:
+            try:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=int(prompt_id))
+            except Exception:
+                pass
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
@@ -2368,28 +2442,6 @@ async def v2_text_wrapper(update,context):
 
 def build_app() -> Application:
     app = Application.builder().token(BOT_TOKEN).build()
-
-    stock_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_stock, pattern="^add_stock$")],
-        states={
-            ADD_STOCK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_stock_flow)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
-
-    supplier_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_supplier, pattern="^add_supplier$")],
-        states={
-            ADD_SUPPLIER: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_supplier)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True,
-    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("access", access))
