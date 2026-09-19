@@ -1247,6 +1247,18 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         form[flow_field] = value
         context.user_data["v2_step"] = step + 1
 
+        # Nettoyage : le message "📷 Caméra prête" est supprimé après un scan
+        # pour éviter d'empiler les anciennes ouvertures de caméra dans Telegram.
+        camera_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+        if camera_prompt_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=msg.chat_id,
+                    message_id=int(camera_prompt_id),
+                )
+            except Exception:
+                pass
+
         # Le clavier ReplyKeyboard qui a servi à ouvrir la caméra est
         # toujours retiré après un scan. Le prochain champ utilise son propre
         # bouton inline "📷 Scanner", avec son URL/field exact.
@@ -1714,9 +1726,21 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{SCANNER_WEBAPP_URL}?mode=flow"
         f"&section={section}&field={field}"
     )
+    # Supprime une éventuelle ancienne invite caméra avant d'en créer une
+    # nouvelle : un seul message "Caméra prête" reste visible à la fois.
+    old_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+    if old_prompt_id:
+        try:
+            await context.bot.delete_message(
+                chat_id=q.message.chat_id,
+                message_id=int(old_prompt_id),
+            )
+        except Exception:
+            pass
+
     # ReplyKeyboard séparé : c'est ce mécanisme qui permet à sendData()
     # de remonter les données au bot sous StatusUpdate.WEB_APP_DATA.
-    await q.message.reply_text(
+    prompt_msg = await q.message.reply_text(
         "📷 <b>Caméra prête</b>\n"
         "Scanne maintenant le QR/code-barres puis ferme la caméra.",
         parse_mode=ParseMode.HTML,
@@ -1728,6 +1752,7 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             is_persistent=False,
         ),
     )
+    context.user_data["camera_prompt_message_id"] = prompt_msg.message_id
 
 
 async def v2_handler(update, context):
@@ -2351,6 +2376,15 @@ async def v2_text_router(update, context):
     # (ReplyKeyboard), pas des callback queries.
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_context"):
         sec = context.user_data.get("scan_context") or ""
+        camera_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+        if camera_prompt_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=int(camera_prompt_id),
+                )
+            except Exception:
+                pass
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
@@ -2364,6 +2398,15 @@ async def v2_text_router(update, context):
 
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
         sec = context.user_data.get("v2_section") or ""
+        camera_prompt_id = context.user_data.pop("camera_prompt_message_id", None)
+        if camera_prompt_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=int(camera_prompt_id),
+                )
+            except Exception:
+                pass
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
         await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
