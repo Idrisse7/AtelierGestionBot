@@ -455,6 +455,22 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     action = q.data
 
+    # 💰 Comptabilité : délégation vers le module comptable
+    if action.startswith("compta:"):
+        # Le module utilise la même DB persistante que le reste du bot.
+        context.application.bot_data["db"] = DB
+        # compta_handle_callback appelle q.answer(); celui-ci a déjà été appelé
+        # par callback(), donc on traite directement les actions ici sans refaire answer.
+        compta_action = action.split(":", 1)[1]
+        if compta_action == "menu":
+            await q.edit_message_text(compta_summary_text(DB), reply_markup=compta_menu_keyboard(), parse_mode="HTML")
+            return
+        if compta_action in {"invoices","credits","payments","expenses","bank"}:
+            await q.edit_message_text(compta_summary_text(DB), reply_markup=compta_section_keyboard(compta_action), parse_mode="HTML")
+            return
+        # Pour les autres actions, utiliser le gestionnaire dédié.
+        return await compta_handle_callback(update, context)
+
     if action == "home":
         await q.edit_message_text(
             home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu()
