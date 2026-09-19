@@ -2407,7 +2407,7 @@ def build_app() -> Application:
     # Commande/Livraison/Réparation/Déblocage, y compris après un scan caméra.
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, v2_text_wrapper),
-        group=0,
+        group=-1,
     )
 
     app.add_handler(CallbackQueryHandler(flow_scan_callback, pattern=r"^flow_scan:"))
