@@ -1594,19 +1594,15 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
     (ReplyKeyboard), car Telegram.WebApp.sendData() renvoie les données au bot
     avec ce type de lancement. Les champs ordinaires gardent le clavier inline.
 
-    Pour le déblocage, la première étape (type) est un choix métier : on ne
-    scanne pas "FRP/iCloud" avec la caméra. On affiche donc directement les
-    deux choix afin de pouvoir passer proprement à l'étape appareil, qui elle
-    dispose bien du scanner.
+    Pour le déblocage, le champ type reste volontairement un champ texte libre.
+    Les champs réellement scannables (appareil/IMEI) affichent le bouton caméra
+    en plus de la saisie manuelle.
     """
     sec = section or FLOW_SECTIONS.get(flow, "")
 
-    if flow == "deblocage" and field == "type":
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔓 FRP / Google", callback_data="deblocage_type:FRP")],
-            [InlineKeyboardButton("🍎 iCloud / Apple", callback_data="deblocage_type:iCloud")],
-            [InlineKeyboardButton("↩️ Retour", callback_data=f"v2menu:{sec}" if sec else "home")],
-        ])
+    # Le champ Type de déblocage reste un champ texte libre :
+    # l'utilisateur peut écrire FRP / Google ou iCloud / Apple manuellement.
+    # On ne transforme surtout pas cette étape en menu de choix.
 
     if field in FLOW_SCAN_FIELDS.get(flow, set()):
         # Le bouton reste INLINE pour ne jamais bloquer les autres boutons
@@ -2428,7 +2424,6 @@ def build_app() -> Application:
     app.add_handler(stock_conv)
     app.add_handler(supplier_conv)
     app.add_handler(CallbackQueryHandler(flow_scan_callback, pattern=r"^flow_scan:"))
-    app.add_handler(CallbackQueryHandler(deblocage_type_callback, pattern=r"^deblocage_type:"))
     app.add_handler(CallbackQueryHandler(v2_handler, pattern=r"^v2(menu|act):"))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, scanner_webapp))
