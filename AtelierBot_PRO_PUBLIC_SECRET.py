@@ -1248,7 +1248,7 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        await msg.reply_text("", reply_markup=ReplyKeyboardRemove())
+        await msg.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
 
         if step == len(steps):
             await _finish_flow(update, context, flow, form)
@@ -1291,7 +1291,7 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-    await msg.reply_text("", reply_markup=ReplyKeyboardRemove())
+    await msg.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
 
     # Scanner contextuel depuis un sous-menu : on mémorise le résultat sans
     # toucher au stock.
@@ -1727,7 +1727,7 @@ async def v2_handler(update, context):
         sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
             try:
-                await q.message.reply_text("", reply_markup=ReplyKeyboardRemove())
+                await q.message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
             except Exception:
                 pass
             await q.edit_message_text(
@@ -1743,7 +1743,7 @@ async def v2_handler(update, context):
 
     if act != "scan":
         try:
-            await q.message.reply_text("", reply_markup=ReplyKeyboardRemove())
+            await q.message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
         except Exception:
             pass
 
@@ -2385,13 +2385,13 @@ async def v2_text_router(update, context):
                     await update.effective_message.reply_text("❌ Réponds <b>FRP</b> ou <b>iCloud</b>.", parse_mode=ParseMode.HTML, reply_markup=back_menu()); return True
             f[key]=txt; context.user_data["v2_step"]=step+1
             if step == len(steps):
-                await update.effective_message.reply_text("", reply_markup=ReplyKeyboardRemove())
+                await update.effective_message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
                 await _finish_flow(update,context,flow,f)
             else:
                 next_key, next_prompt = steps[step]
                 section = context.user_data.get("v2_section") or FLOW_SECTIONS.get(flow, "")
                 next_markup = flow_keyboard(flow, next_key, section)
-                await update.effective_message.reply_text("", reply_markup=ReplyKeyboardRemove())
+                await update.effective_message.reply_text("⁣", reply_markup=ReplyKeyboardRemove())
                 await update.effective_message.reply_text(
                     next_prompt,
                     parse_mode=ParseMode.HTML,
