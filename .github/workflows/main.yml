@@ -11,7 +11,6 @@ concurrency:
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
   bot:
@@ -118,6 +117,10 @@ jobs:
           json.loads(plain)
 
           Path("data.json").write_bytes(plain)
+          try:
+              Path("data.json").chmod(0o600)
+          except OSError:
+              pass
 
           print("Base dechiffree et valide.")
           PY
@@ -205,6 +208,7 @@ jobs:
       - name: Nettoyer les fichiers temporaires
         if: always()
         run: |
+          chmod 600 data.json 2>/dev/null || true
           rm -f data.json
           rm -rf backups
 
