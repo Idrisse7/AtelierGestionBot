@@ -1672,11 +1672,20 @@ async def _dismiss_camera_keyboard(context, chat_id):
     effectivement affiché : dans tous les autres cas (grande majorité des
     étapes, remplies au clavier normal), on ne fait rien et on n'envoie
     aucun message superflu.
+
+    Le message technique utilisé pour transporter le ReplyKeyboardRemove
+    est envoyé puis supprimé aussitôt : Telegram a besoin d'un texte non
+    vide pour l'accepter, mais rien ne doit rester visible dans le chat
+    (un simple "✅" s'affichait en grand, un seul emoji étant agrandi
+    automatiquement par Telegram).
     """
     had_prompt = await _delete_camera_prompt(context, chat_id)
     if had_prompt:
         try:
-            await context.bot.send_message(chat_id=chat_id, text="✅", reply_markup=ReplyKeyboardRemove())
+            sent = await context.bot.send_message(
+                chat_id=chat_id, text="·", reply_markup=ReplyKeyboardRemove()
+            )
+            await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
         except Exception:
             pass
 
