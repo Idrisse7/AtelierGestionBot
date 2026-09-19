@@ -1223,6 +1223,16 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not (value.isdigit() and len(value) == 15 and valid_imei(value)):
                 await msg.reply_text("❌ IMEI invalide (15 chiffres + contrôle Luhn).")
                 return
+        elif flow_field == "type":
+            # Le bouton caméra est disponible en plus de la saisie manuelle.
+            normalized_type = value.strip().upper().replace("-", "").replace(" ", "")
+            if normalized_type in {"FRP", "GOOGLE", "FRPGOOGLE"}:
+                value = "FRP"
+            elif normalized_type in {"ICLOUD", "APPLE", "ICLOUDAPPLE"}:
+                value = "iCloud"
+            else:
+                await msg.reply_text("❌ Le scan doit contenir FRP / Google ou iCloud / Apple.")
+                return
         elif not value or len(value) > 120:
             await msg.reply_text("❌ Valeur scannée invalide.")
             return
@@ -1571,7 +1581,7 @@ FLOW_SCAN_FIELDS = {
     "movement_in": {"reference"},
     "movement_out": {"reference"},
     "reparation": {"numero", "imei", "etiquette"},
-    "deblocage": {"appareil", "imei"},
+    "deblocage": {"type", "appareil", "imei"},
     "rupture_add": {"reference"},
 }
 
@@ -1594,9 +1604,10 @@ def flow_keyboard(flow: str, field: str, section: str | None = None):
     (ReplyKeyboard), car Telegram.WebApp.sendData() renvoie les données au bot
     avec ce type de lancement. Les champs ordinaires gardent le clavier inline.
 
-    Pour le déblocage, le champ type reste volontairement un champ texte libre.
-    Les champs réellement scannables (appareil/IMEI) affichent le bouton caméra
-    en plus de la saisie manuelle.
+    Pour le déblocage, le champ type reste un champ texte libre et possède
+    également le bouton caméra : on peut donc écrire FRP/iCloud à la main
+    ou scanner un QR/code-barres qui contient ce type. Les champs appareil/IMEI
+    gardent eux aussi le bouton caméra en plus de la saisie manuelle.
     """
     sec = section or FLOW_SECTIONS.get(flow, "")
 
