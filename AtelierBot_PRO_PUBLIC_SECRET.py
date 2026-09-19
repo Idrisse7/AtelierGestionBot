@@ -1158,6 +1158,23 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ref = str(payload.get("reference", "")).strip()
     value = str(payload.get("value", "")).strip().replace(" ", "")
     kind_hint = str(payload.get("type", "")).upper()
+    payload_field = str(payload.get("field", "")).strip()
+    payload_section = str(payload.get("section", "")).strip()
+
+    # Contexte du formulaire : le scan doit remplir le champ courant directement.
+    # Il ne faut donc surtout pas exiger une référence stock pour une livraison,
+    # une réparation, un déblocage, etc.
+    scan_context = context.user_data.get("scan_context")
+    flow = context.user_data.get("v2_flow")
+    step = int(context.user_data.get("v2_step", 1))
+    steps = context.user_data.get("v2_steps", [])
+    form = context.user_data.setdefault("v2_form", {})
+    flow_section = context.user_data.get("v2_section") or FLOW_SECTION_BY_FLOW.get(flow, "")
+    flow_field = steps[step - 1][0] if flow and 1 <= step <= len(steps) else ""
+
+    # Le contexte envoyé par la page publique est seulement un garde-fou :
+    # le champ réellement autorisé reste celui du formulaire Telegram en cours.
+    is_flow_scan = bool(flow and flow_field in FLOW_SCAN_FIELDS and (not payload_field or payload_field == flow_field))
 
     # Détermine le type du code.
     is_imei = value.isdigit() and len(value) == 15
@@ -1168,18 +1185,13 @@ async def scanner_webapp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind = "IMEI"
     elif valid_barcode(value) or kind_hint in {"QR", "BARCODE", "CODE_BARRES"}:
         kind = "QR" if kind_hint == "QR" else "CODE_BARRES"
+    elif is_flow_scan and re.fullmatch(r"[A-Za-z0-9._:/-]{1,80}", value):
+        # Les numéros de commande/suivi/étiquette peuvent contenir des tirets
+        # ou des séparateurs : ils ne doivent pas être bloqués comme un code-barres.
+        kind = "CODE_SCAN"
     else:
         await msg.reply_text("❌ Code non reconnu.")
         return
-
-    # Depuis un formulaire, le scan remplit directement le champ en cours.
-    # Cela fonctionne aussi avec le bouton WebApp direct (sans passer par le sous-menu Scanner).
-    scan_context = context.user_data.get("scan_context")
-    flow = context.user_data.get("v2_flow")
-    step = int(context.user_data.get("v2_step", 1))
-    steps = context.user_data.get("v2_steps", [])
-    form = context.user_data.setdefault("v2_form", {})
-    flow_section = context.user_data.get("v2_section") or FLOW_SECTION_BY_FLOW.get(flow, "")
 
     if flow and 1 <= step <= len(steps):
         key, _prompt = steps[step - 1]
@@ -1531,13 +1543,29 @@ FLOW_SECTION_BY_FLOW = {
 }
 
 
+def scanner_flow_url(section: str, field: str) -> str:
+    # Le scanner reçoit le contexte du formulaire : il n'affiche donc pas
+    # la saisie "Référence stock" quand on scanne un numéro de commande,
+    # un suivi, un IMEI, une étiquette, etc.
+    from urllib.parse import quote
+    return (
+        f"{SCANNER_WEBAPP_URL}?mode=flow"
+        f"&section={quote(str(section), safe='')}"
+        f"&field={quote(str(field), safe='')}"
+    )
+
+
 def flow_keyboard(section: str, field: str) -> InlineKeyboardMarkup:
     buttons = []
     if field in FLOW_SCAN_FIELDS:
-        # Ouverture directe de la caméra : pas d'écran intermédiaire.
-        # Le formulaire en cours reste dans user_data et le scan remplira son champ courant.
+        # Ouverture directe de la caméra avec le champ courant comme contexte.
+        # La page scanner sait ainsi si elle doit demander une référence stock
+        # ou simplement renvoyer le code au formulaire en cours.
         buttons.append([
-            InlineKeyboardButton("📷 Scanner", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL)),
+            InlineKeyboardButton(
+                "📷 Scanner",
+                web_app=WebAppInfo(url=scanner_flow_url(section, field)),
+            ),
             InlineKeyboardButton("⬅️ Retour", callback_data="home"),
         ])
     else:
@@ -1674,8 +1702,9 @@ async def v2_handler(update, context):
         step = int(context.user_data.get("v2_step", 1))
         steps = context.user_data.get("v2_steps", [])
         current_field = steps[step - 1][0] if flow and 1 <= step <= len(steps) else None
+        scan_url = scanner_flow_url(sec, current_field) if flow and current_field in FLOW_SCAN_FIELDS else SCANNER_WEBAPP_URL
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=SCANNER_WEBAPP_URL))],
+            [InlineKeyboardButton("📷 Ouvrir la caméra", web_app=WebAppInfo(url=scan_url))],
             [InlineKeyboardButton("⬅️ Retour", callback_data=f"v2menu:{sec}")],
         ])
         if flow and current_field in FLOW_SCAN_FIELDS:
