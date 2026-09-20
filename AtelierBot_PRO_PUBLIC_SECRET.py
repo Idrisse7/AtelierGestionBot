@@ -1,5 +1,6 @@
 import os
 import base64
+import hashlib
 import io
 import json
 import html
@@ -8,7 +9,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -66,6 +67,56 @@ SEARCH, ADD_STOCK, ADD_SUPPLIER, ADD_ORDER, ADD_DELIVERY, ADD_REPAIR = range(6)
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# Verrouillage anti brute-force sur /access.
+ACCESS_MAX_ATTEMPTS = 5
+ACCESS_LOCKOUT_MINUTES = 15
+
+
+def _access_state(chat_id: int) -> dict[str, Any]:
+    states = DB.setdefault("access_attempts", {})
+    return states.setdefault(str(chat_id), {"count": 0, "locked_until": None})
+
+
+def _access_locked_remaining(chat_id: int) -> int:
+    """Retourne le nombre de minutes restantes de verrouillage (0 si pas verrouille)."""
+    state = _access_state(chat_id)
+    locked_until = state.get("locked_until")
+    if not locked_until:
+        return 0
+    try:
+        until = datetime.fromisoformat(locked_until)
+    except ValueError:
+        return 0
+    remaining = (until - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        state["count"] = 0
+        state["locked_until"] = None
+        save_db(DB)
+        return 0
+    return max(1, int(remaining // 60) + 1)
+
+
+def _access_register_failure(chat_id: int) -> int:
+    """Enregistre un echec, verrouille si besoin. Retourne les tentatives restantes."""
+    state = _access_state(chat_id)
+    state["count"] = state.get("count", 0) + 1
+    remaining = ACCESS_MAX_ATTEMPTS - state["count"]
+    if remaining <= 0:
+        until = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_LOCKOUT_MINUTES)
+        state["locked_until"] = until.replace(microsecond=0).isoformat()
+        state["count"] = 0
+        log_activity(chat_id, "ACCESS_LOCKED", f"{ACCESS_LOCKOUT_MINUTES} min")
+    save_db(DB)
+    return max(0, remaining)
+
+
+def _access_register_success(chat_id: int) -> None:
+    state = _access_state(chat_id)
+    state["count"] = 0
+    state["locked_until"] = None
+    save_db(DB)
 
 
 def default_db() -> dict[str, Any]:
@@ -189,10 +240,35 @@ def user_record(chat_id: int) -> dict[str, Any] | None:
     return DB.get("users", {}).get(str(chat_id))
 
 
+def _password_hash(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
 def authorized(chat_id: int | None) -> bool:
     if chat_id is None:
         return False
-    return str(chat_id) in DB.get("users", {})
+
+    rec = DB.get("users", {}).get(str(chat_id))
+    if not rec:
+        return False
+
+    # L'admin (defini par ADMIN_CHAT_ID ou role admin) n'est jamais
+    # invalide par un changement de mot de passe : sinon il pourrait
+    # se bloquer lui-meme en changeant le secret ATELIER_PASSWORD.
+    if chat_id == ADMIN_CHAT_ID or rec.get("role") == "admin":
+        return True
+
+    if not ATELIER_PASSWORD:
+        # Fail-closed : si le secret est absent/mal configure, on ne
+        # laisse PAS passer les anciens comptes par defaut. Seul
+        # l'admin (deja filtre au-dessus) garde l'acces.
+        return False
+
+    # Le mot de passe qui a servi lors de la derniere autorisation de
+    # ce collaborateur doit encore correspondre au mot de passe actuel.
+    # Si le mot de passe a ete change depuis (secret GitHub modifie),
+    # l'acces est automatiquement coupe et redemande.
+    return rec.get("password_hash") == _password_hash(ATELIER_PASSWORD)
 
 
 def admin(chat_id: int | None) -> bool:
@@ -412,13 +488,25 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("✅ Tu as déjà accès à AtelierBot.")
         return
 
+    locked_minutes = _access_locked_remaining(chat_id)
+    if locked_minutes:
+        await update.effective_message.reply_text(
+            f"🔒 Trop de tentatives échouées.\n\n"
+            f"Réessaie dans environ {locked_minutes} min.",
+        )
+        return
+
     supplied = " ".join(context.args).strip()
     if supplied and supplied == ATELIER_PASSWORD:
+        _access_register_success(chat_id)
+        existing = DB["users"].get(str(chat_id), {})
         DB["users"][str(chat_id)] = {
-            "role": "collaborateur",
+            **existing,
+            "role": existing.get("role", "collaborateur"),
             "name": update.effective_user.full_name if update.effective_user else "Collaborateur",
             "username": update.effective_user.username if update.effective_user else "",
-            "added_at": now_iso(),
+            "added_at": existing.get("added_at", now_iso()),
+            "password_hash": _password_hash(ATELIER_PASSWORD),
         }
         log_activity(chat_id, "ACCESS_GRANTED", "Nouveau collaborateur")
         await update.effective_message.reply_text(
@@ -429,8 +517,17 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    remaining = _access_register_failure(chat_id)
+    if remaining <= 0:
+        await update.effective_message.reply_text(
+            f"🔒 Trop de tentatives échouées.\n\n"
+            f"Accès bloqué {ACCESS_LOCKOUT_MINUTES} minutes.",
+        )
+        return
+
     await update.effective_message.reply_text(
         "❌ Mot de passe incorrect.\n\n"
+        f"Il reste {remaining} tentative(s).\n"
         "Format : <code>/access MOT_DE_PASSE</code>",
         parse_mode=ParseMode.HTML,
     )
