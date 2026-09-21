@@ -332,7 +332,7 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📥📤 Mouvements", callback_data="v2menu:mouvements"),
          InlineKeyboardButton("🔎 Rechercher", callback_data="search")],
         [InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device")],
-        [InlineKeyboardButton("👥 Collaborateurs", callback_data="v2menu:collaborateurs"),
+        [InlineKeyboardButton("⚙️ Administration", callback_data="v2menu:collaborateurs"),
          InlineKeyboardButton("📝 Activité", callback_data="activity")],
         [InlineKeyboardButton("📋 Inventaire", callback_data="v2act:stock:inventory")],
         [InlineKeyboardButton("💰 Comptabilité", callback_data="compta:menu")],
@@ -1932,6 +1932,24 @@ async def flow_scan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["camera_prompt_message_id"] = prompt.message_id
 
 
+def admin_dashboard_text() -> str:
+    users = DB.get("users", {})
+    total = len(users)
+    approved = sum(1 for r in users.values() if r.get("approved"))
+    pending = sum(1 for r in users.values() if r.get("password_hash") and not r.get("approved"))
+    moderators = sum(1 for r in users.values() if r.get("role") == "moderateur")
+    return (
+        "⚙️ <b>ADMINISTRATION</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Utilisateurs : <b>{total}</b>\n"
+        f"✅ Approuvés : <b>{approved}</b>\n"
+        f"⏳ En attente de validation : <b>{pending}</b>\n"
+        f"🛡️ Modérateurs : <b>{moderators}</b>\n"
+        f"👑 Admin : <code>{ADMIN_CHAT_ID}</code>\n\n"
+        "Choisis une action :"
+    )
+
+
 async def v2_handler(update, context):
     q = update.callback_query
     if not q or not await require_access(update):
@@ -1942,8 +1960,12 @@ async def v2_handler(update, context):
         sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
             await _dismiss_camera_keyboard(context, update.effective_chat.id)
+            title = admin_dashboard_text() if sec == "collaborateurs" else (
+                V2_SECTIONS[sec][0] + "\n\nChoisis une action :"
+            )
             await q.edit_message_text(
-                V2_SECTIONS[sec][0] + "\n\nChoisis une action :",
+                title,
+                parse_mode=ParseMode.HTML,
                 reply_markup=v2_keyboard(sec),
             )
         return
