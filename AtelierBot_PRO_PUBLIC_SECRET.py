@@ -504,6 +504,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     supplied = " ".join(context.args).strip()
+    if supplied:
+        try:
+            if update.effective_message:
+                await update.effective_message.delete()
+        except Exception:
+            log.exception("Impossible de supprimer le message /access contenant le mot de passe")
     if not supplied:
         context.user_data["awaiting_access_password"] = True
         await update.effective_message.reply_text(
@@ -537,6 +543,11 @@ async def _process_access_password(update: Update, context: ContextTypes.DEFAULT
         return
 
     if supplied and hmac.compare_digest(supplied, ATELIER_PASSWORD):
+        try:
+            if update.effective_message:
+                await update.effective_message.delete()
+        except Exception:
+            log.exception("Impossible de supprimer le message contenant le mot de passe")
         _access_register_success(chat_id)
         existing = DB["users"].get(str(chat_id), {})
         current_password_hash = _password_hash(ATELIER_PASSWORD)
