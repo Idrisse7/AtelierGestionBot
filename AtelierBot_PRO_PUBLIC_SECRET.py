@@ -1,6 +1,7 @@
 import os
 import base64
 import hashlib
+import hmac
 import io
 import json
 import html
@@ -510,7 +511,7 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     supplied = " ".join(context.args).strip()
-    if supplied and supplied == ATELIER_PASSWORD:
+    if supplied and hmac.compare_digest(supplied, ATELIER_PASSWORD):
         _access_register_success(chat_id)
         existing = DB["users"].get(str(chat_id), {})
         DB["users"][str(chat_id)] = {
