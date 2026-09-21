@@ -70,8 +70,8 @@ def now_iso() -> str:
 
 
 # Verrouillage anti brute-force sur /access.
-ACCESS_MAX_ATTEMPTS = 5
-ACCESS_LOCKOUT_MINUTES = 15
+ACCESS_MAX_ATTEMPTS = 4
+ACCESS_LOCKOUT_MINUTES = 1440  # 24 heures
 
 
 def _access_state(chat_id: int) -> dict[str, Any]:
@@ -79,7 +79,14 @@ def _access_state(chat_id: int) -> dict[str, Any]:
     return states.setdefault(str(chat_id), {"count": 0, "locked_until": None})
 
 
-def _access_locked_remaining(chat_id: int) -> int:
+def _format_lock_duration(minutes: int) -> str:
+    if minutes >= 60:
+        hours = minutes // 60
+        rest = minutes % 60
+        if rest:
+            return f"{hours} h {rest} min"
+        return f"{hours} h"
+    return f"{minutes} min"
     """Retourne le nombre de minutes restantes de verrouillage (0 si pas verrouille)."""
     state = _access_state(chat_id)
     locked_until = state.get("locked_until")
@@ -262,6 +269,11 @@ def authorized(chat_id: int | None) -> bool:
         # Fail-closed : si le secret est absent/mal configure, on ne
         # laisse PAS passer les anciens comptes par defaut. Seul
         # l'admin (deja filtre au-dessus) garde l'acces.
+        return False
+
+    # Pour tout le monde d'autre : le mot de passe seul ne suffit pas,
+    # il faut aussi avoir ete valide manuellement par l'admin.
+    if not rec.get("approved", False):
         return False
 
     # Le mot de passe qui a servi lors de la derniere autorisation de
@@ -449,7 +461,8 @@ def home_text(current_chat_id: int | None = None) -> str:
             if (admin(current_chat_id) or moderator(current_chat_id))
             else ""
         )
-        + "🟢 <i>Base prête pour tes vraies données.</i>"
+        + "🟢 <i>Base prête pour tes vraies données.</i>\n\n"
+        + "⚡️ <b>BY DRISSI</b> ⚡️"
     )
 
 async def require_access(update: Update) -> bool:
@@ -492,7 +505,7 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if locked_minutes:
         await update.effective_message.reply_text(
             f"🔒 Trop de tentatives échouées.\n\n"
-            f"Réessaie dans environ {locked_minutes} min.",
+            f"Réessaie dans environ {_format_lock_duration(locked_minutes)}.",
         )
         return
 
@@ -507,21 +520,50 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "username": update.effective_user.username if update.effective_user else "",
             "added_at": existing.get("added_at", now_iso()),
             "password_hash": _password_hash(ATELIER_PASSWORD),
+            "approved": existing.get("approved", False),
         }
-        log_activity(chat_id, "ACCESS_GRANTED", "Nouveau collaborateur")
+        log_activity(chat_id, "ACCESS_PASSWORD_OK", "Mot de passe correct, en attente de validation")
+        save_db(DB)
+
+        if DB["users"][str(chat_id)]["approved"]:
+            await update.effective_message.reply_text(
+                "🔓 <b>Accès autorisé !</b>\n\nTape /start.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
         await update.effective_message.reply_text(
-            "🔓 <b>Accès autorisé !</b>\n\n"
-            "Ton Chat ID est maintenant enregistré dans data.json.\n"
-            "Tape /start.",
+            "🔐 <b>Mot de passe correct.</b>\n\n"
+            "En attente de validation par l'administrateur avant d'accéder à AtelierBot. "
+            "Tu recevras un message dès que ton accès sera confirmé.",
             parse_mode=ParseMode.HTML,
         )
+
+        name = update.effective_user.full_name if update.effective_user else str(chat_id)
+        username = f"@{update.effective_user.username}" if update.effective_user and update.effective_user.username else ""
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_CHAT_ID,
+                text=(
+                    "🆕 <b>Nouvelle demande d'accès AtelierBot</b>\n\n"
+                    f"👤 {name} {username}\n"
+                    f"🆔 <code>{chat_id}</code>"
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Approuver", callback_data=f"approve_access:{chat_id}"),
+                    InlineKeyboardButton("❌ Refuser", callback_data=f"deny_access:{chat_id}"),
+                ]]),
+            )
+        except Exception:
+            log.exception("Notification admin impossible pour %s", chat_id)
         return
 
     remaining = _access_register_failure(chat_id)
     if remaining <= 0:
         await update.effective_message.reply_text(
             f"🔒 Trop de tentatives échouées.\n\n"
-            f"Accès bloqué {ACCESS_LOCKOUT_MINUTES} minutes.",
+            f"Accès bloqué {_format_lock_duration(ACCESS_LOCKOUT_MINUTES)}.",
         )
         return
 
@@ -571,10 +613,57 @@ async def show_stock(update: Update):
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    if not await require_access(update):
-        return
 
     action = q.data
+
+    # Approbation/refus d'une demande d'accès : reserve a l'admin, traite
+    # avant require_access() car la personne qui clique est l'admin, pas
+    # le demandeur (qui lui n'a justement pas encore acces).
+    if action.startswith("approve_access:") or action.startswith("deny_access:"):
+        chat_id = update.effective_chat.id if update.effective_chat else None
+        if not admin(chat_id):
+            await q.answer("⛔ Accès refusé.", show_alert=True)
+            return
+        target = action.split(":", 1)[1]
+        if action.startswith("approve_access:"):
+            rec = DB.setdefault("users", {}).get(target)
+            if rec:
+                rec["approved"] = True
+                save_db(DB)
+                log_activity(int(target), "ACCESS_APPROVED", f"Approuve par {chat_id}")
+            try:
+                await context.bot.send_message(
+                    chat_id=int(target),
+                    text="✅ <b>Ton accès a été approuvé !</b>\n\nTape /start pour continuer.",
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                log.exception("Impossible de notifier %s de son approbation", target)
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        else:
+            rec = DB.get("users", {}).get(target)
+            if rec:
+                rec["approved"] = False
+                save_db(DB)
+                log_activity(int(target), "ACCESS_DENIED", f"Refuse par {chat_id}")
+            try:
+                await context.bot.send_message(
+                    chat_id=int(target),
+                    text="❌ Ta demande d'accès à AtelierBot a été refusée.",
+                )
+            except Exception:
+                log.exception("Impossible de notifier %s de son refus", target)
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        return
+
+    if not await require_access(update):
+        return
 
     # 💰 Comptabilité : délégation vers le module comptable
     if action.startswith("compta:"):
