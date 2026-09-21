@@ -88,14 +88,17 @@ def _format_lock_duration(minutes: int) -> str:
             return f"{hours} h {rest} min"
         return f"{hours} h"
     return f"{minutes} min"
-    """Retourne le nombre de minutes restantes de verrouillage (0 si pas verrouille)."""
+
+
+def _access_locked_remaining(chat_id: int) -> int:
+    """Retourne le nombre de minutes restantes de verrouillage (0 si pas verrouillé)."""
     state = _access_state(chat_id)
     locked_until = state.get("locked_until")
     if not locked_until:
         return 0
     try:
         until = datetime.fromisoformat(locked_until)
-    except ValueError:
+    except (TypeError, ValueError):
         return 0
     remaining = (until - datetime.now(timezone.utc)).total_seconds()
     if remaining <= 0:
@@ -490,7 +493,9 @@ async def require_access(update: Update) -> bool:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_access(update):
+    if not authorized(update.effective_chat.id if update.effective_chat else None):
+        context.user_data["awaiting_access_password"] = True
+        await require_access(update)
         return
     await update.effective_message.reply_text(
         home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
@@ -498,6 +503,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    supplied = " ".join(context.args).strip()
+    if not supplied:
+        context.user_data["awaiting_access_password"] = True
+        await update.effective_message.reply_text(
+            "🔐 <b>Accès protégé</b>\n\n"
+            "Envoie maintenant le mot de passe collaborateur.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    context.user_data.pop("awaiting_access_password", None)
+    await _process_access_password(update, context, supplied)
+
+
+async def _process_access_password(update: Update, context: ContextTypes.DEFAULT_TYPE, supplied: str):
     if not ATELIER_PASSWORD:
         await update.effective_message.reply_text(
             "⚠️ Le mot de passe collaborateur n'est pas configuré sur le serveur."
@@ -517,18 +536,19 @@ async def access(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    supplied = " ".join(context.args).strip()
     if supplied and hmac.compare_digest(supplied, ATELIER_PASSWORD):
         _access_register_success(chat_id)
         existing = DB["users"].get(str(chat_id), {})
+        current_password_hash = _password_hash(ATELIER_PASSWORD)
+        same_password = existing.get("password_hash") == current_password_hash
         DB["users"][str(chat_id)] = {
             **existing,
             "role": existing.get("role", "collaborateur"),
             "name": update.effective_user.full_name if update.effective_user else "Collaborateur",
             "username": update.effective_user.username if update.effective_user else "",
             "added_at": existing.get("added_at", now_iso()),
-            "password_hash": _password_hash(ATELIER_PASSWORD),
-            "approved": existing.get("approved", False),
+            "password_hash": current_password_hash,
+            "approved": bool(existing.get("approved", False) and same_password),
         }
         log_activity(chat_id, "ACCESS_PASSWORD_OK", "Mot de passe correct, en attente de validation")
         save_db(DB)
@@ -2646,7 +2666,16 @@ async def v2_text_wrapper(update,context):
     On conserve les anciens flux Stock/Fournisseur en les routant explicitement
     ici lorsqu'ils utilisent encore leur clé ``step``.
     """
-    if not update.effective_message or not authorized(update.effective_chat.id):
+    if not update.effective_message:
+        return
+
+    if context.user_data.get("awaiting_access_password") and not authorized(update.effective_chat.id):
+        supplied = (update.effective_message.text or "").strip()
+        context.user_data.pop("awaiting_access_password", None)
+        await _process_access_password(update, context, supplied)
+        return
+
+    if not authorized(update.effective_chat.id):
         return
 
     step = context.user_data.get("step")
