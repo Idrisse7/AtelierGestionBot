@@ -320,8 +320,14 @@ def esc(v: Any) -> str:
     return html.escape(str(v if v is not None else ""))
 
 
-def menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def menu(chat_id: int | None = None) -> InlineKeyboardMarkup:
+    # Boutons d'administration visibles uniquement pour admin/moderateur.
+    admin_row = []
+    if chat_id is not None and can_manage_users(chat_id):
+        admin_row.append(InlineKeyboardButton("🛡️ Administration", callback_data="v2menu:collaborateurs"))
+    if chat_id is not None and admin(chat_id):
+        admin_row.append(InlineKeyboardButton("📝 Activité", callback_data="activity"))
+    rows = [
         [InlineKeyboardButton("📦 Stock", callback_data="v2menu:stock"),
          InlineKeyboardButton("🚨 Ruptures", callback_data="v2menu:ruptures")],
         [InlineKeyboardButton("📋 Commandes", callback_data="v2menu:commandes"),
@@ -333,12 +339,13 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📥📤 Mouvements", callback_data="v2menu:mouvements"),
          InlineKeyboardButton("🔎 Rechercher", callback_data="search")],
         [InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device")],
-        [InlineKeyboardButton("🛡️ Administration", callback_data="v2menu:collaborateurs"),
-         InlineKeyboardButton("📝 Activité", callback_data="activity")],
+        admin_row,
         [InlineKeyboardButton("📋 Inventaire", callback_data="v2act:stock:inventory")],
         [InlineKeyboardButton("💰 Comptabilité", callback_data="compta:menu")],
         [InlineKeyboardButton("🔄 Actualiser", callback_data="home")],
-    ])
+    ]
+    rows = [r for r in rows if r]
+    return InlineKeyboardMarkup(rows)
 
 
 def back_menu() -> InlineKeyboardMarkup:
@@ -486,7 +493,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_access(update):
         return
     await update.effective_message.reply_text(
-        home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu()
+        home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
     )
 
 
@@ -684,7 +691,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "home":
         await q.edit_message_text(
-            home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu()
+            home_text(update.effective_chat.id), parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
         )
         return
 
@@ -1077,7 +1084,7 @@ async def search_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"🔎 <b>{len(results)} résultat(s)</b>\n\n" + "\n\n".join(results[:30])
 
     await update.effective_message.reply_text(
-        text, parse_mode=ParseMode.HTML, reply_markup=menu()
+        text, parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
     )
 
 
@@ -1159,7 +1166,7 @@ async def add_stock_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💶 {money(price)}\n"
             f"📍 {esc(item['emplacement'])}",
             parse_mode=ParseMode.HTML,
-            reply_markup=menu(),
+            reply_markup=menu(update.effective_chat.id if update.effective_chat else None),
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -1201,7 +1208,7 @@ async def add_supplier(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_activity(update.effective_chat.id, "SUPPLIER_CREATE", context.user_data["nom"])
         context.user_data.clear()
         await update.effective_message.reply_text(
-            "✅ Fournisseur ajouté.", reply_markup=menu()
+            "✅ Fournisseur ajouté.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
         )
         return ConversationHandler.END
     return ConversationHandler.END
@@ -1265,7 +1272,7 @@ async def stock_movement(update: Update, context: ContextTypes.DEFAULT_TYPE, dir
     await update.effective_message.reply_text(
         f"✅ Stock {ref} : <b>{old}</b> → <b>{new}</b>",
         parse_mode=ParseMode.HTML,
-        reply_markup=menu(),
+        reply_markup=menu(update.effective_chat.id if update.effective_chat else None),
     )
 
 
@@ -1673,14 +1680,14 @@ async def stop_scanner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     context.user_data.clear()
     await update.effective_message.reply_text(
-        "🛑 <b>Scan terminé.</b>", parse_mode=ParseMode.HTML, reply_markup=menu()
+        "🛑 <b>Scan terminé.</b>", parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
     )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _dismiss_camera_keyboard(context, update.effective_chat.id)
     context.user_data.clear()
-    await update.effective_message.reply_text("❌ Opération annulée.", reply_markup=menu())
+    await update.effective_message.reply_text("❌ Opération annulée.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None))
     return ConversationHandler.END
 
 
@@ -1960,6 +1967,9 @@ async def v2_handler(update, context):
     if data.startswith("v2menu:"):
         sec = data.split(":", 1)[1]
         if sec in V2_SECTIONS:
+            if sec == "collaborateurs" and not can_manage_users(update.effective_chat.id):
+                await q.answer("🔒 Réservé à l’administrateur ou au modérateur.", show_alert=True)
+                return
             await _dismiss_camera_keyboard(context, update.effective_chat.id)
             title = admin_dashboard_text() if sec == "collaborateurs" else (
                 V2_SECTIONS[sec][0] + "\n\nChoisis une action :"
@@ -1974,6 +1984,10 @@ async def v2_handler(update, context):
         return
     _, sec, act = data.split(":", 2)
     if sec not in V2_SECTIONS:
+        return
+
+    if sec == "collaborateurs" and not can_manage_users(update.effective_chat.id):
+        await q.answer("🔒 Réservé à l’administrateur ou au modérateur.", show_alert=True)
         return
 
     if act != "scan":
@@ -2141,7 +2155,7 @@ async def _finish_flow(update, context, flow, f):
         DB["stock"].append(item)
         DB["mouvements"].append({"date": now_iso(), "reference": item["reference"], "type": "ENTREE_INITIALE", "quantite": item["quantite"], "chat_id": cid})
         log_activity(cid, "STOCK_CREATE", item["reference"])
-        context.user_data.clear(); await update.effective_message.reply_text("✅ <b>Référence ajoutée au stock.</b>", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
+        context.user_data.clear(); await update.effective_message.reply_text("✅ <b>Référence ajoutée au stock.</b>", parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
     if flow == "commande_add":
         try: f["montant"] = _safe_float(f["montant"])
         except ValueError: await update.effective_message.reply_text("❌ Montant invalide.", reply_markup=back_menu()); return True
@@ -2212,7 +2226,7 @@ async def _finish_flow(update, context, flow, f):
         return False
     save_db(DB); context.user_data.clear()
     labels={"commande_add":"commande","livraison_add":"livraison","fournisseur_add_v2":"fournisseur","movement_in":"entrée stock","movement_out":"sortie stock","reparation":"réparation","deblocage":"dossier de déblocage","rupture_add":"mise en rupture"}
-    await update.effective_message.reply_text(f"✅ <b>{labels[flow].capitalize()} enregistré(e).</b>", parse_mode=ParseMode.HTML, reply_markup=menu())
+    await update.effective_message.reply_text(f"✅ <b>{labels[flow].capitalize()} enregistré(e).</b>", parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None))
     return True
 
 
@@ -2368,25 +2382,25 @@ async def v2_text_router(update, context):
         sec, found = context.user_data.pop("v2_edit_target"); found["statut"] = txt; save_db(DB); await update.effective_message.reply_text("✅ Élément modifié.", reply_markup=v2_keyboard(sec)); return True
 
     if context.user_data.get("v2_flow") == "collaborateur_add":
-        if not can_manage_users(update.effective_chat.id): context.user_data.clear(); await update.effective_message.reply_text("🔒 Action réservée à l’administrateur ou au modérateur.", reply_markup=menu()); return True
+        if not can_manage_users(update.effective_chat.id): context.user_data.clear(); await update.effective_message.reply_text("🔒 Action réservée à l’administrateur ou au modérateur.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         if not re.fullmatch(r"-?\d+", txt): await update.effective_message.reply_text("❌ Chat ID invalide. Envoie uniquement le numéro.", reply_markup=back_menu()); return True
         cid = str(txt); old = DB.get("users", {}).get(cid) or {}
         DB.setdefault("users", {})[cid] = {**old, "role":"collaborateur", "name":old.get("name","Collaborateur"), "username":old.get("username",""), "added_at":old.get("added_at",now_iso())}
         save_db(DB); context.user_data.clear()
-        await update.effective_message.reply_text(f"✅ Collaborateur <code>{esc(cid)}</code> ajouté.\n\nIl doit utiliser /start sur le bot.", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
+        await update.effective_message.reply_text(f"✅ Collaborateur <code>{esc(cid)}</code> ajouté.\n\nIl doit utiliser /start sur le bot.", parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
 
     if context.user_data.get("v2_flow") == "collaborateur_role":
         if not admin(update.effective_chat.id):
-            context.user_data.clear(); await update.effective_message.reply_text("🔒 Seul l’administrateur peut gérer les rôles.", reply_markup=menu()); return True
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Seul l’administrateur peut gérer les rôles.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         needle=txt.lower(); found=None
         for cid,rec in _user_rows():
             hay=" ".join([cid,str(rec.get("name","")),str(rec.get("username",""))]).lower()
             if needle in hay: found=(cid,rec); break
         if not found:
-            context.user_data.clear(); await update.effective_message.reply_text("❌ Collaborateur introuvable.", reply_markup=menu()); return True
+            context.user_data.clear(); await update.effective_message.reply_text("❌ Collaborateur introuvable.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         cid,rec=found
         if cid == str(ADMIN_CHAT_ID) or rec.get("role") == "admin":
-            context.user_data.clear(); await update.effective_message.reply_text("🔒 Le compte administrateur ne peut pas être rétrogradé.", reply_markup=menu()); return True
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Le compte administrateur ne peut pas être rétrogradé.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         new_role = "moderateur" if rec.get("role") != "moderateur" else "collaborateur"
         rec["role"] = new_role
         save_db(DB)
@@ -2395,29 +2409,29 @@ async def v2_text_router(update, context):
         await update.effective_message.reply_text(
             f"✅ <b>{esc(rec.get('name','Collaborateur'))}</b> est maintenant <b>{label}</b>.\n\n"
             "Le modérateur peut ajouter et révoquer des collaborateurs, mais ne peut pas gérer les rôles ni l'administrateur.",
-            parse_mode=ParseMode.HTML, reply_markup=menu()
+            parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)
         ); return True
 
     if context.user_data.get("v2_flow") == "collaborateur_revoke":
-        if not can_manage_users(update.effective_chat.id): context.user_data.clear(); await update.effective_message.reply_text("🔒 Action réservée à l’administrateur ou au modérateur.", reply_markup=menu()); return True
+        if not can_manage_users(update.effective_chat.id): context.user_data.clear(); await update.effective_message.reply_text("🔒 Action réservée à l’administrateur ou au modérateur.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         needle=txt.lower(); found=None
         for cid,rec in _user_rows():
             hay=" ".join([cid,str(rec.get("name","")),str(rec.get("username",""))]).lower()
             if needle in hay: found=(cid,rec); break
-        if not found: context.user_data.clear(); await update.effective_message.reply_text("❌ Collaborateur introuvable.", reply_markup=menu()); return True
+        if not found: context.user_data.clear(); await update.effective_message.reply_text("❌ Collaborateur introuvable.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         cid,rec=found
         if cid == str(ADMIN_CHAT_ID) or rec.get("role") == "admin":
-            context.user_data.clear(); await update.effective_message.reply_text("🔒 Impossible de révoquer l’administrateur.", reply_markup=menu()); return True
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Impossible de révoquer l’administrateur.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
         if moderator(update.effective_chat.id) and rec.get("role") == "moderateur":
-            context.user_data.clear(); await update.effective_message.reply_text("🔒 Un modérateur ne peut pas révoquer un autre modérateur.", reply_markup=menu()); return True
-        DB["users"].pop(cid,None); save_db(DB); context.user_data.clear(); await update.effective_message.reply_text(f"🗑️ {esc(rec.get('name','Collaborateur'))} révoqué.", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
+            context.user_data.clear(); await update.effective_message.reply_text("🔒 Un modérateur ne peut pas révoquer un autre modérateur.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
+        DB["users"].pop(cid,None); save_db(DB); context.user_data.clear(); await update.effective_message.reply_text(f"🗑️ {esc(rec.get('name','Collaborateur'))} révoqué.", parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
 
     if context.user_data.get("v2_status"):
         st=context.user_data.pop("v2_status"); needle=txt.lower()
         for x in DB.get("reparations",[]):
             if needle in " ".join(str(v) for v in x.values()).lower():
-                old=x.get("statut",""); x["statut"]=st; x.setdefault("historique",[]).append({"date":now_iso(),"action":"statut","ancien":old,"nouveau":st,"user":str(update.effective_chat.id)}); save_db(DB); await update.effective_message.reply_text(f"✅ {esc(old)} → <b>{esc(st)}</b>", parse_mode=ParseMode.HTML, reply_markup=menu()); return True
-        await update.effective_message.reply_text("❌ Réparation introuvable.", reply_markup=menu()); return True
+                old=x.get("statut",""); x["statut"]=st; x.setdefault("historique",[]).append({"date":now_iso(),"action":"statut","ancien":old,"nouveau":st,"user":str(update.effective_chat.id)}); save_db(DB); await update.effective_message.reply_text(f"✅ {esc(old)} → <b>{esc(st)}</b>", parse_mode=ParseMode.HTML, reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
+        await update.effective_message.reply_text("❌ Réparation introuvable.", reply_markup=menu(update.effective_chat.id if update.effective_chat else None)); return True
 
     # Mode inventaire : contrôle physique référence par référence.
     if context.user_data.get("inventory_items") is not None:
@@ -2564,7 +2578,7 @@ async def v2_text_router(update, context):
             f"💰 Valeur d'achat du stock : <b>{money(stock_value)}</b>\n\n"
             "✅ Les corrections ont été enregistrées dans la base persistante.",
             parse_mode=ParseMode.HTML,
-            reply_markup=menu(),
+            reply_markup=menu(update.effective_chat.id if update.effective_chat else None),
         )
         return True
 
@@ -2575,14 +2589,14 @@ async def v2_text_router(update, context):
         await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
-        await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
+        await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu(update.effective_chat.id if update.effective_chat else None))
         return True
 
     if txt in {"↩️ Retour", "⬅️ Retour"} and context.user_data.get("scan_mode") and not context.user_data.get("v2_flow"):
         await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
-        await update.effective_message.reply_text("Menu principal :", reply_markup=menu())
+        await update.effective_message.reply_text("Menu principal :", reply_markup=menu(update.effective_chat.id if update.effective_chat else None))
         return True
 
     if txt == "↩️ Retour" and context.user_data.get("v2_flow"):
@@ -2590,7 +2604,7 @@ async def v2_text_router(update, context):
         await _delete_camera_prompt(context, update.effective_chat.id)
         context.user_data.clear()
         await update.effective_message.reply_text("↩️ Retour.", reply_markup=ReplyKeyboardRemove())
-        await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu())
+        await update.effective_message.reply_text("Choisis une action :", reply_markup=v2_keyboard(sec) if sec else menu(update.effective_chat.id if update.effective_chat else None))
         return True
 
     flow=context.user_data.get("v2_flow")
