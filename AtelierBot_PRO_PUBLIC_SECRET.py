@@ -332,7 +332,7 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📥📤 Mouvements", callback_data="v2menu:mouvements"),
          InlineKeyboardButton("🔎 Rechercher", callback_data="search")],
         [InlineKeyboardButton("📷 Scanner appareil", callback_data="scan_device")],
-        [InlineKeyboardButton("⚙️ Administration", callback_data="v2menu:collaborateurs"),
+        [InlineKeyboardButton("🛡️ Administration", callback_data="v2menu:collaborateurs"),
          InlineKeyboardButton("📝 Activité", callback_data="activity")],
         [InlineKeyboardButton("📋 Inventaire", callback_data="v2act:stock:inventory")],
         [InlineKeyboardButton("💰 Comptabilité", callback_data="compta:menu")],
@@ -1939,7 +1939,7 @@ def admin_dashboard_text() -> str:
     pending = sum(1 for r in users.values() if r.get("password_hash") and not r.get("approved"))
     moderators = sum(1 for r in users.values() if r.get("role") == "moderateur")
     return (
-        "⚙️ <b>ADMINISTRATION</b>\n"
+        "🛡️ <b>ADMINISTRATION</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 Utilisateurs : <b>{total}</b>\n"
         f"✅ Approuvés : <b>{approved}</b>\n"
