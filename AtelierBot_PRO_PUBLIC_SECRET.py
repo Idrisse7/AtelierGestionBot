@@ -53,7 +53,7 @@ DATA_FILE = Path(__file__).with_name("data.json")
 BACKUP_DIR = Path(__file__).with_name("backups")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SCANNER_WEBAPP_URL = "https://idrisse7.github.io/AtelierGestionBot1/"
+SCANNER_WEBAPP_URL = "https://scintillating-cheesecake-39f2f0.netlify.app/"
 ATELIER_PASSWORD = os.getenv("ATELIER_PASSWORD", "").strip()
 
 logging.basicConfig(
